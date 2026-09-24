@@ -1,0 +1,25 @@
+check_interval_seconds = 1800
+command_timeout_seconds = 60
+
+[temperature]
+hdd_warning = 50
+ssd_warning = 60
+nvme_warning = 70
+hysteresis = 5
+
+[alerts]
+# A system service usually has no user session bus. See README.
+desktop = false
+telegram = false
+kernel_cooldown_seconds = 300
+
+[kernel]
+enabled = true
+
+[smart]
+enabled = true
+# Skip standby/sleeping HDDs without clearing their last measurements.
+skip_sleeping = true
+
+[devices]
+ignore_serials = []

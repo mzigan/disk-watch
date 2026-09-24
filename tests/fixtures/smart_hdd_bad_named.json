@@ -1,0 +1,65 @@
+{
+  "smartctl": {
+    "exit_status": 200
+  },
+  "model_name": "WD Red Plus 4TB",
+  "serial_number": "WD-TEST1",
+  "smart_status": {
+    "passed": false
+  },
+  "temperature": {
+    "current": 36
+  },
+  "ata_smart_attributes": {
+    "table": [
+      {
+        "id": 5,
+        "raw": {
+          "value": 6
+        },
+        "name": "Reallocated_Sector_Ct"
+      },
+      {
+        "id": 187,
+        "raw": {
+          "value": 2
+        },
+        "name": "Reported_Uncorrect"
+      },
+      {
+        "id": 197,
+        "raw": {
+          "value": 58
+        },
+        "name": "Current_Pending_Sector"
+      },
+      {
+        "id": 198,
+        "raw": {
+          "value": 8
+        },
+        "name": "Offline_Uncorrectable"
+      },
+      {
+        "id": 199,
+        "raw": {
+          "value": 3
+        },
+        "name": "UDMA_CRC_Error_Count"
+      }
+    ]
+  },
+  "ata_smart_self_test_log": {
+    "standard": {
+      "table": [
+        {
+          "status": {
+            "value": 112,
+            "string": "Completed: read failure",
+            "passed": false
+          }
+        }
+      ]
+    }
+  }
+}

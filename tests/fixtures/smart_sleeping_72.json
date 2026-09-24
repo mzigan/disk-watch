@@ -1,0 +1,10 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {
+    "version": [7, 2],
+    "messages": [
+      {"string": "Device is in STANDBY mode, exit(3)", "severity": "information"}
+    ],
+    "exit_status": 3
+  }
+}

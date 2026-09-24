@@ -1,0 +1,30 @@
+[Unit]
+Description=Disk SMART and kernel I/O health monitor
+After=local-fs.target systemd-journald.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/disk-watch daemon
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+StateDirectory=disk-watch
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Keep host /dev and sysfs visible: smartctl requires real device access.
+PrivateDevices=false
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
