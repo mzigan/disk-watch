@@ -37,6 +37,7 @@ Root нужен для доступа `smartctl` к устройствам. Unit
 sudo disk-watch devices
 sudo disk-watch check
 sudo disk-watch status
+sudo disk-watch status --verbose # подробности и Recent events
 sudo disk-watch daemon
 sudo disk-watch --config ./packaging/config.toml --state /tmp/disk-watch/state.json check
 ```
@@ -46,7 +47,9 @@ sudo disk-watch --config ./packaging/config.toml --state /tmp/disk-watch/state.j
   Без cursor читает последние 200 сообщений текущей загрузки; с cursor — новые
   записи после него. Код 1 означает неполную проверку/ошибку команды или конфигурации;
   сам health Warning/Critical не меняет код 0. Пропуск sleeping HDD — не ошибка.
-- `status`: данные state без обращения к накопителям, включая возраст данных через
+- `status`: только краткий summary (counts и причины для Critical/Warning/Unknown).
+- `status --verbose`: тот же summary, затем подробные данные state и Recent events
+  без обращения к накопителям, включая возраст данных через
   время последней успешной SMART-проверки в Unix seconds. Это исторический snapshot,
   а не подтверждение работы демона или свежести показателей прямо сейчас.
 - `daemon`: SMART/discovery по таймеру и непрерывный kernel journal.
@@ -203,3 +206,11 @@ Unit/CLI regression tests используют fixtures и подставные 
 не нужны. Покрыты mixed exit bits, race идентичности, missing fields, vendor raw,
 replay, немедленный Critical, медленный writer, остановка reader, sleeping и aborted
 self-tests, а также прежние проверки diff/hysteresis/state/SMART PASSED + kernel Critical.
+
+### Обновление
+
+```bash
+cargo build --release
+sudo install -m755 target/release/disk-watch /usr/local/bin/disk-watch
+sudo systemctl restart disk-watch
+```

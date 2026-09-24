@@ -30,7 +30,14 @@ enum Action {
     Daemon,
     Check,
     Devices,
-    Status,
+    Status {
+        /// Include detailed disk status and recent events after the summary.
+        #[arg(long)]
+        verbose: bool,
+        /// Compatibility with the previous explicit summary mode.
+        #[arg(long, hide = true, conflicts_with = "verbose")]
+        summary: bool,
+    },
 }
 enum Scan {
     Inventory(Vec<Device>),
@@ -388,6 +395,155 @@ fn handle_kernel(
         .filter(|d| d.serial.is_empty() || !cfg.devices.ignore_serials.contains(&d.serial));
     apply_kernel(state, record, disk, cfg, tx);
 }
+fn status_summary(state: &State) -> String {
+    // Group by the existing health result; presentation never classifies disks.
+    let disks: Vec<_> = state.disks.values().map(|d| (d, d.health())).collect();
+    let mut out = format!("DISKS: {}\n", disks.len());
+    for health in ["OK", "Warning", "Critical", "Unknown"] {
+        let count = disks.iter().filter(|(_, h)| *h == health).count();
+        out.push_str(&format!("{}: {count}\n", health.to_uppercase()));
+    }
+    if !disks.is_empty() && disks.iter().all(|(_, h)| *h == "OK") {
+        out.push_str("\nAll disks OK\n");
+    }
+    for health in ["Critical", "Warning", "Unknown"] {
+        let mut group = disks.iter().filter(|(_, h)| *h == health).peekable();
+        if group.peek().is_none() {
+            continue;
+        }
+        out.push_str(&format!("\n{}:\n", health.to_uppercase()));
+        for (d, _) in group {
+            out.push_str(&format!(
+                "  {} {}",
+                escaped(&d.device.model),
+                escaped(&d.device.path)
+            ));
+            if !d.device.serial.is_empty()
+                && disks
+                    .iter()
+                    .filter(|(other, _)| other.device.model == d.device.model)
+                    .count()
+                    > 1
+            {
+                out.push_str(&format!(" serial={}", escaped(&d.device.serial)));
+            }
+            out.push('\n');
+            let mut reason = |key: &str, value: String, stale: bool| {
+                out.push_str(&format!(
+                    "    {key}={value}{}\n",
+                    if stale { " (stale)" } else { "" }
+                ));
+            };
+            if !d.present {
+                reason("present", "no".into(), false);
+            }
+            let check = match d.check_status {
+                state::CheckStatus::Checked => None,
+                state::CheckStatus::Never => Some("not_checked"),
+                state::CheckStatus::Partial => Some("partial"),
+                state::CheckStatus::Sleeping => Some("skipped_sleeping"),
+                state::CheckStatus::Failed => Some("failed"),
+                state::CheckStatus::StaleRace => Some("stale_identity_race"),
+                state::CheckStatus::Disabled => Some("disabled"),
+            };
+            if let Some(check) = check {
+                reason("smart_check", check.into(), false);
+            }
+            if let Some(s) = &d.snapshot {
+                for (key, value) in &s.counters {
+                    if *value == 0 {
+                        continue;
+                    }
+                    let label = match key.as_str() {
+                        "Current_Pending_Sector" => "pending",
+                        "Offline_Uncorrectable" => "offline_uncorrectable",
+                        "Reallocated_Event_Count" => "reallocated_events",
+                        "Reallocated_Sector_Ct" => "reallocated",
+                        "Reported_Uncorrect" => "reported_uncorrect",
+                        "UDMA_CRC_Error_Count" => "crc_errors",
+                        "Command_Timeout" => "command_timeouts",
+                        _ => key,
+                    };
+                    reason(
+                        &escaped(label),
+                        value.to_string(),
+                        s.stale_fields.contains(key),
+                    );
+                }
+                if d.hot {
+                    reason(
+                        "temperature",
+                        s.temperature
+                            .map(|t| format!("{t}C"))
+                            .unwrap_or_else(|| "unknown".into()),
+                        s.stale_fields.contains("temperature"),
+                    );
+                }
+                for (key, value, show) in [
+                    ("smart_passed", "no".into(), s.passed == Some(false)),
+                    ("prefailure", "yes".into(), s.prefailure == Some(true)),
+                    (
+                        "critical_warning",
+                        s.critical_warning.unwrap_or_default().to_string(),
+                        s.critical_warning.is_some_and(|n| n != 0),
+                    ),
+                    (
+                        "self_test",
+                        "failed".into(),
+                        s.self_test_status == Some(smart::SelfTestStatus::Failed),
+                    ),
+                    (
+                        "available_spare",
+                        s.available_spare.unwrap_or_default().to_string(),
+                        s.available_spare
+                            .zip(s.spare_threshold)
+                            .is_some_and(|(a, b)| a < b),
+                    ),
+                    (
+                        "percentage_used",
+                        s.percentage_used.unwrap_or_default().to_string(),
+                        s.percentage_used.is_some_and(|n| n >= 100),
+                    ),
+                    (
+                        "remaining_life",
+                        s.remaining_life.unwrap_or_default().to_string(),
+                        s.remaining_life.is_some_and(|n| n <= 10),
+                    ),
+                    ("past_threshold", "yes".into(), s.exit.past_threshold),
+                    ("error_log", "yes".into(), s.exit.error_log),
+                    ("self_test_log", "yes".into(), s.exit.self_test_log),
+                ] {
+                    if show {
+                        let field = match key {
+                            "smart_passed" => "passed",
+                            "self_test" => "self_test_status",
+                            _ => key,
+                        };
+                        reason(key, value, s.stale_fields.contains(field));
+                    }
+                }
+                if s.passed.is_none() {
+                    reason("smart_health", "unknown".into(), false);
+                }
+                if !s.stale_fields.is_empty() {
+                    reason("stale_fields", "yes".into(), false);
+                }
+                if s.issue.is_some() {
+                    reason("smart_data", "incomplete".into(), false);
+                }
+            } else {
+                reason("smart_data", "unavailable".into(), false);
+            }
+            if d.smart_error.is_some() && check.is_none() {
+                reason("smart_error", "yes".into(), false);
+            }
+            if d.kernel_severity.is_some_and(|s| s != Severity::Info) {
+                reason("kernel_io_errors", "yes".into(), false);
+            }
+        }
+    }
+    out
+}
 fn display(state: &State) {
     if state.disks.is_empty() {
         println!("No known physical disks.");
@@ -610,8 +766,13 @@ async fn main() -> Result<()> {
             .unwrap_or(std::path::Path::new("/etc/disk-watch/config.toml")),
         cli.config.is_some(),
     )?;
-    if matches!(cli.command, Action::Status) {
-        display(&State::load(&cli.state));
+    if let Action::Status { verbose, .. } = cli.command {
+        let state = State::load(&cli.state);
+        print!("{}", status_summary(&state));
+        if verbose {
+            println!();
+            display(&state);
+        }
         return Ok(());
     }
     if matches!(cli.command, Action::Devices) {

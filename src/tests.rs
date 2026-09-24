@@ -1302,3 +1302,152 @@ fn bracket_nvme_namespace_uses_current_discovery_alias() {
     );
     assert_eq!(state.disks[&d.key()].health(), "Critical");
 }
+
+fn summary_ok_disks(count: usize) -> State {
+    let mut state = State::default();
+    for index in 0..count {
+        let mut d = device();
+        d.serial = format!("DISK-{index}");
+        d.model = format!("Disk-{index}");
+        d.path = format!("/dev/test{index}");
+        let mut disk = DiskState::new(d.clone());
+        disk.check_status = state::CheckStatus::Checked;
+        disk.snapshot = Some(smart::Snapshot {
+            passed: Some(true),
+            ..Default::default()
+        });
+        state.disks.insert(d.key(), disk);
+    }
+    state
+}
+
+#[test]
+fn summary_counts_seven_disks_and_only_lists_critical_reasons() {
+    let mut state = summary_ok_disks(7);
+    let disk = state.disks.values_mut().next().unwrap();
+    disk.device.model = "WD30PURX-89G0VS1".into();
+    disk.device.path = "/dev/sde".into();
+    disk.kernel_severity = Some(Severity::Critical);
+    disk.kernel_last_message = Some("FULL KERNEL MESSAGE".into());
+    let s = disk.snapshot.as_mut().unwrap();
+    s.counters.insert("Current_Pending_Sector".into(), 58);
+    s.counters.insert("Reallocated_Sector_Ct".into(), 15);
+    s.counters.insert("UDMA_CRC_Error_Count".into(), 0);
+    s.firmware = "PRIVATE-FIRMWARE".into();
+    s.power_on_hours = Some(54321);
+    s.temperature = Some(35);
+    s.unknown_attributes
+        .insert("VENDOR-ATTRIBUTE".into(), serde_json::json!(123));
+    assert_eq!(
+        status_summary(&state),
+        "DISKS: 7\nOK: 6\nWARNING: 0\nCRITICAL: 1\nUNKNOWN: 0\n\nCRITICAL:\n  WD30PURX-89G0VS1 /dev/sde\n    pending=58\n    reallocated=15\n    kernel_io_errors=yes\n"
+    );
+}
+
+#[test]
+fn summary_all_ok_and_empty_inventory() {
+    assert_eq!(
+        status_summary(&summary_ok_disks(7)),
+        "DISKS: 7\nOK: 7\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 0\n\nAll disks OK\n"
+    );
+    let empty = status_summary(&State::default());
+    assert!(empty.starts_with("DISKS: 0\n"));
+    assert!(!empty.contains("All disks OK"));
+}
+
+#[test]
+fn summary_unknown_reasons_and_stale_values_keep_existing_health() {
+    for (check, label) in [
+        (state::CheckStatus::Failed, "failed"),
+        (state::CheckStatus::Sleeping, "skipped_sleeping"),
+    ] {
+        let mut state = summary_ok_disks(1);
+        let disk = state.disks.values_mut().next().unwrap();
+        disk.check_status = check;
+        let s = disk.snapshot.as_mut().unwrap();
+        s.counters.insert("Current_Pending_Sector".into(), 58);
+        s.stale_fields.insert("Current_Pending_Sector".into());
+        let before = serde_json::to_value(&state).unwrap();
+        let summary = status_summary(&state);
+        assert!(summary.starts_with("DISKS: 1\nOK: 0\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 1\n"));
+        assert!(summary.contains(&format!("smart_check={label}")));
+        assert!(summary.contains("pending=58 (stale)"));
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    }
+}
+
+#[test]
+fn summary_groups_warning_temperature_and_duplicate_models() {
+    let mut state = summary_ok_disks(3);
+    for (index, disk) in state.disks.values_mut().enumerate() {
+        disk.device.model = "Same Model".into();
+        match index {
+            0 => {
+                disk.kernel_severity = Some(Severity::Critical);
+            }
+            1 => {
+                disk.hot = true;
+                let s = disk.snapshot.as_mut().unwrap();
+                s.temperature = Some(52);
+                s.counters.insert("UDMA_CRC_Error_Count".into(), 3);
+            }
+            _ => {
+                disk.check_status = state::CheckStatus::Never;
+            }
+        }
+    }
+    let summary = status_summary(&state);
+    assert!(summary.find("\nCRITICAL:\n").unwrap() < summary.find("\nWARNING:\n").unwrap());
+    assert!(summary.find("\nWARNING:\n").unwrap() < summary.find("\nUNKNOWN:\n").unwrap());
+    assert!(summary.contains("temperature=52C"));
+    assert!(summary.contains("crc_errors=3"));
+    for i in 0..3 {
+        assert!(summary.contains(&format!("serial=DISK-{i}")));
+    }
+}
+
+#[test]
+fn summary_counter_names_are_short_and_zero_counters_are_omitted() {
+    let mut state = summary_ok_disks(1);
+    let disk = state.disks.values_mut().next().unwrap();
+    disk.kernel_severity = Some(Severity::Critical);
+    let names = [
+        ("Current_Pending_Sector", "pending"),
+        ("Offline_Uncorrectable", "offline_uncorrectable"),
+        ("Reallocated_Event_Count", "reallocated_events"),
+        ("Reallocated_Sector_Ct", "reallocated"),
+        ("Reported_Uncorrect", "reported_uncorrect"),
+        ("UDMA_CRC_Error_Count", "crc_errors"),
+        ("Command_Timeout", "command_timeouts"),
+    ];
+    for (original, _) in names {
+        disk.snapshot
+            .as_mut()
+            .unwrap()
+            .counters
+            .insert(original.into(), 3);
+    }
+    let summary = status_summary(&state);
+    for (original, label) in names {
+        assert!(summary.contains(&format!("    {label}=3\n")));
+        assert!(!summary.contains(original));
+    }
+    for value in state
+        .disks
+        .values_mut()
+        .next()
+        .unwrap()
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .counters
+        .values_mut()
+    {
+        *value = 0;
+    }
+    let summary = status_summary(&state);
+    for (_, label) in names {
+        assert!(!summary.contains(&format!("{label}=")));
+    }
+    assert!(summary.contains("kernel_io_errors=yes"));
+}

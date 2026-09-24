@@ -76,7 +76,7 @@ fn check_status_and_restart_preserve_critical() {
     assert!(!String::from_utf8_lossy(&second.stderr).contains("new disk discovered"));
     let status = env.command("status").output().unwrap();
     assert!(status.status.success());
-    assert!(String::from_utf8_lossy(&status.stdout).contains("health: Critical"));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("CRITICAL: 1"));
 }
 #[test]
 fn daemon_reads_kernel_while_smart_is_slow_and_stops_cleanly() {
@@ -282,4 +282,41 @@ fn smartctl_72_standby_syntax_and_legacy_sleeping_json() {
     let failed = env.command("check").output().unwrap();
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stdout).contains("SMART check: Failed"));
+}
+
+#[test]
+fn status_defaults_to_summary_and_verbose_preserves_details() {
+    let env = Sandbox::new();
+    assert!(env.command("check").output().unwrap().status.success());
+    let full = env.command("status").arg("--verbose").output().unwrap();
+    assert!(full.status.success());
+    let full = String::from_utf8(full.stdout).unwrap();
+    let brief = env.command("status").output().unwrap();
+    assert!(brief.status.success());
+    let brief = String::from_utf8(brief.stdout).unwrap();
+    assert!(brief.starts_with("DISKS: 1\n"));
+    assert!(brief.contains("kernel_io_errors=yes"));
+    assert!(full.starts_with(&brief));
+    let legacy = env.command("status").arg("--summary").output().unwrap();
+    assert!(legacy.status.success());
+    assert_eq!(String::from_utf8(legacy.stdout).unwrap(), brief);
+    assert!(full.contains("firmware:"));
+    assert!(full.contains("Recent events:"));
+    assert!(!brief.contains("firmware:"));
+    assert!(!brief.contains("Recent events:"));
+    assert!(!brief.contains("uninterpreted vendor attributes"));
+    assert!(!brief.contains("I/O error, dev sdb"));
+}
+
+#[test]
+fn status_all_ok_is_short() {
+    let env = Sandbox::new();
+    env.script("journalctl", "#!/bin/sh\nexit 0\n");
+    assert!(env.command("check").output().unwrap().status.success());
+    let status = env.command("status").output().unwrap();
+    assert!(status.status.success());
+    assert_eq!(
+        String::from_utf8(status.stdout).unwrap(),
+        "DISKS: 1\nOK: 1\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 0\n\nAll disks OK\n"
+    );
 }
