@@ -47,7 +47,9 @@ sudo disk-watch --config ./packaging/config.toml --state /tmp/disk-watch/state.j
   Без cursor читает последние 200 сообщений текущей загрузки; с cursor — новые
   записи после него. Код 1 означает неполную проверку/ошибку команды или конфигурации;
   сам health Warning/Critical не меняет код 0. Пропуск sleeping HDD — не ошибка.
-- `status`: только краткий summary (counts и причины для Critical/Warning/Unknown).
+- `status`: только краткий summary (counts и причины для Critical/Warning/Unknown)
+  текущих дисков (`present=true`). Отсутствующие диски сохраняются в истории и
+  показываются в `--verbose` с `present: false` и `last known health`.
 - `status --verbose`: тот же summary, затем подробные данные state и Recent events
   без обращения к накопителям, включая возраст данных через
   время последней успешной SMART-проверки в Unix seconds. Это исторический snapshot,

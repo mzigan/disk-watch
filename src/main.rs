@@ -397,7 +397,12 @@ fn handle_kernel(
 }
 fn status_summary(state: &State) -> String {
     // Group by the existing health result; presentation never classifies disks.
-    let disks: Vec<_> = state.disks.values().map(|d| (d, d.health())).collect();
+    let disks: Vec<_> = state
+        .disks
+        .values()
+        .filter(|d| d.present)
+        .map(|d| (d, d.health()))
+        .collect();
     let mut out = format!("DISKS: {}\n", disks.len());
     for health in ["OK", "Warning", "Critical", "Unknown"] {
         let count = disks.iter().filter(|(_, h)| *h == health).count();
@@ -434,9 +439,6 @@ fn status_summary(state: &State) -> String {
                     if stale { " (stale)" } else { "" }
                 ));
             };
-            if !d.present {
-                reason("present", "no".into(), false);
-            }
             let check = match d.check_status {
                 state::CheckStatus::Checked => None,
                 state::CheckStatus::Never => Some("not_checked"),
@@ -550,11 +552,16 @@ fn display(state: &State) {
     }
     for d in state.disks.values() {
         println!(
-            "{}\n  serial: {}\n  device: {}\n  present: {}\n  health: {}\n  last SMART check (Unix seconds): {:?}",
+            "{}\n  serial: {}\n  device: {}\n  present: {}\n  {}: {}\n  last SMART check (Unix seconds): {:?}",
             escaped(&d.device.model),
             escaped(&d.device.serial),
             escaped(&d.device.path),
             d.present,
+            if d.present {
+                "health"
+            } else {
+                "last known health"
+            },
             d.health(),
             d.checked_at
         );

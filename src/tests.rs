@@ -1451,3 +1451,31 @@ fn summary_counter_names_are_short_and_zero_counters_are_omitted() {
     }
     assert!(summary.contains("kernel_io_errors=yes"));
 }
+
+#[test]
+fn summary_excludes_absent_disks_without_changing_history() {
+    let mut state = summary_ok_disks(7);
+    let absent = state.disks.values_mut().next().unwrap();
+    absent.present = false;
+    absent.kernel_severity = Some(Severity::Critical);
+    absent.kernel_last_message = Some("I/O error, dev sde".into());
+    absent
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .counters
+        .insert("Current_Pending_Sector".into(), 58);
+    let before = serde_json::to_value(&state).unwrap();
+    assert_eq!(
+        status_summary(&state),
+        "DISKS: 6\nOK: 6\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 0\n\nAll disks OK\n"
+    );
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    for disk in state.disks.values_mut() {
+        disk.present = false;
+    }
+    assert_eq!(
+        status_summary(&state),
+        "DISKS: 0\nOK: 0\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 0\n"
+    );
+}

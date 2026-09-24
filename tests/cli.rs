@@ -320,3 +320,49 @@ fn status_all_ok_is_short() {
         "DISKS: 1\nOK: 1\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 0\n\nAll disks OK\n"
     );
 }
+
+#[test]
+fn absent_disk_history_is_only_shown_in_verbose_status() {
+    let env = Sandbox::new();
+    assert!(env.command("check").output().unwrap().status.success());
+    let path = env.root.join("state.json");
+    let before: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let old_disk = before["disks"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    env.script(
+        "lsblk",
+        "#!/bin/sh\nprintf '%s\\n' '{\"blockdevices\":[]}'\n",
+    );
+    env.script("journalctl", "#!/bin/sh\nexit 0\n");
+    assert!(env.command("check").output().unwrap().status.success());
+    let saved = fs::read(&path).unwrap();
+    let state: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    let disk = state["disks"].as_object().unwrap().values().next().unwrap();
+    assert_eq!(disk["present"], false);
+    for field in [
+        "snapshot",
+        "kernel_severity",
+        "kernel_last_message",
+        "kernel_last_seen",
+        "checked_at",
+    ] {
+        assert_eq!(disk[field], old_disk[field]);
+    }
+    let brief = env.command("status").output().unwrap();
+    assert!(brief.status.success());
+    assert_eq!(
+        String::from_utf8(brief.stdout).unwrap(),
+        "DISKS: 0\nOK: 0\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 0\n"
+    );
+    let full = env.command("status").arg("--verbose").output().unwrap();
+    assert!(full.status.success());
+    let full = String::from_utf8(full.stdout).unwrap();
+    assert!(full.contains("present: false\n  last known health: Critical"));
+    assert!(full.contains("SMART overall passed: Some(true)"));
+    assert!(full.contains("I/O error, dev sdb, sector 123"));
+    assert_eq!(fs::read(&path).unwrap(), saved);
+}
