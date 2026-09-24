@@ -15,6 +15,7 @@ fn device() -> Device {
         aliases: vec!["sdb".into(), "sdb1".into(), "ata2".into()],
         diskseq: None,
         discovered_at: 0,
+        wd_usb: false,
     }
 }
 fn temp() -> PathBuf {
@@ -1478,4 +1479,323 @@ fn summary_excludes_absent_disks_without_changing_history() {
         status_summary(&state),
         "DISKS: 0\nOK: 0\nWARNING: 0\nCRITICAL: 0\nUNKNOWN: 0\n"
     );
+}
+
+fn usb_smart_json() -> serde_json::Value {
+    serde_json::json!({
+        "model_name":"WDC WD10JMVW-11AJGS2", "serial_number":"WD-WXD1E64CP94D",
+        "logical_unit_id":"50014ee6af899d10", "smart_status":{"passed":true},
+        "smartctl":{"exit_status":4,"messages":[{"severity":"error","string":"SMART Status not supported: Incomplete response, ATA output registers missing"}]},
+        "ata_smart_attributes":{"table":[{"id":197,"name":"Current_Pending_Sector","raw":{"value":0}}]}
+    })
+}
+
+#[test]
+fn usb_enclosure_model_mismatch_accepts_smart_identity() {
+    for identity in ["serial", "wwn", "first_read"] {
+        let mut d = device();
+        d.path = "/dev/sdg".into();
+        d.model = "Elements 10B8".into();
+        d.serial = if identity == "serial" {
+            "WD-WXD1E64CP94D"
+        } else {
+            ""
+        }
+        .into();
+        d.wwn = if identity == "wwn" {
+            "0x50014ee6af899d10"
+        } else {
+            ""
+        }
+        .into();
+        let snapshot = smart::parse(&serde_json::to_vec(&usb_smart_json()).unwrap(), 4).unwrap();
+        let mut state = State::default();
+        let mut topology = vec![];
+        let (tx, _) = mpsc::channel(32);
+        apply_scan(
+            &mut state,
+            Scan::Inventory(vec![d.clone()]),
+            &mut topology,
+            &Config::default(),
+            &tx,
+        );
+        apply_scan(
+            &mut state,
+            Scan::Disk(d, Ok(smart::Reading::Checked(Box::new(snapshot)))),
+            &mut topology,
+            &Config::default(),
+            &tx,
+        );
+        assert_eq!(state.disks.len(), 1);
+        let disk = state.disks.values().next().unwrap();
+        assert_eq!(disk.check_status, state::CheckStatus::Checked, "{identity}");
+        assert_eq!(disk.health(), "OK");
+        assert_eq!(disk.device.serial, "WD-WXD1E64CP94D");
+        assert_eq!(
+            disk.snapshot.as_ref().unwrap().model,
+            "WDC WD10JMVW-11AJGS2"
+        );
+        assert_eq!(
+            disk.snapshot.as_ref().unwrap().counters["Current_Pending_Sector"],
+            0
+        );
+    }
+}
+
+#[test]
+fn usb_identity_conflicts_and_diskseq_races_are_still_rejected() {
+    let snapshot = smart::parse(&serde_json::to_vec(&usb_smart_json()).unwrap(), 4).unwrap();
+    let mut d = device();
+    d.model = "Elements 10B8".into();
+    d.wwn = snapshot.wwn.clone();
+    d.serial = "OTHER-SERIAL".into();
+    assert!(
+        smart::identity_mismatch(&d, &snapshot)
+            .unwrap()
+            .contains("serial")
+    );
+    d.serial = snapshot.serial.clone();
+    d.wwn = "50014ee6af899d11".into();
+    assert!(
+        smart::identity_mismatch(&d, &snapshot)
+            .unwrap()
+            .contains("WWN")
+    );
+    d.wwn = snapshot.wwn.clone();
+    d.diskseq = Some(u64::MAX);
+    d.aliases = vec!["disk-watch-nonexistent-usb-test".into()];
+    let mut state = State::default();
+    let (tx, _) = mpsc::channel(32);
+    assert!(apply_result(
+        &mut state,
+        d.clone(),
+        Ok(smart::Reading::Checked(Box::new(snapshot))),
+        &Config::default(),
+        &tx
+    ));
+    assert_eq!(
+        state.disks[&d.key()].check_status,
+        state::CheckStatus::StaleRace
+    );
+    d.serial.clear();
+    d.wwn.clear();
+    let unidentified = smart::Snapshot {
+        model: "Different device".into(),
+        ..Default::default()
+    };
+    assert!(
+        smart::identity_mismatch(&d, &unidentified)
+            .unwrap()
+            .contains("model")
+    );
+}
+
+#[test]
+fn unsupported_smart_status_exception_does_not_hide_other_errors() {
+    for extra_mask in [0, 8, 16, 64] {
+        let mut json = usb_smart_json();
+        json["smartctl"]["exit_status"] = (4 | extra_mask).into();
+        let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 4 | extra_mask).unwrap();
+        assert!(snapshot.issue.is_none());
+        assert!(!snapshot.exit.incomplete);
+        assert_eq!(snapshot.exit.mask, (4 | extra_mask) as u8);
+        assert_eq!(snapshot.passed, Some(extra_mask != 8));
+        assert_eq!(snapshot.exit.prefailure, extra_mask == 16);
+        assert_eq!(snapshot.exit.error_log, extra_mask == 64);
+        assert!(snapshot.counters.contains_key("Current_Pending_Sector"));
+    }
+    for case in [
+        "no_attributes",
+        "other_error",
+        "open_error",
+        "missing_health",
+    ] {
+        let mut json = usb_smart_json();
+        match case {
+            "no_attributes" => {
+                json["ata_smart_attributes"]["table"] = serde_json::json!([]);
+            }
+            "other_error" => {
+                json["smartctl"]["messages"].as_array_mut().unwrap().push(serde_json::json!({"severity":"error","string":"Read SMART Data failed: checksum error"}));
+            }
+            "open_error" => {
+                json["smartctl"]["exit_status"] = 6.into();
+            }
+            _ => {
+                json.as_object_mut().unwrap().remove("smart_status");
+            }
+        }
+        let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 4).unwrap();
+        if case == "missing_health" {
+            assert!(snapshot.issue.is_none());
+            assert_eq!(snapshot.passed, None);
+            assert!(snapshot.unknown());
+        } else {
+            assert!(snapshot.issue.is_some(), "{case}");
+            assert!(snapshot.exit.incomplete);
+        }
+    }
+}
+
+fn wd_usb_discovery(vendor: &str, transport: &str, serial: &str) -> Device {
+    devices::parse(
+        &serde_json::to_vec(&serde_json::json!({"blockdevices":[{
+            "name":"/dev/sdg", "type":"disk", "model":"Elements 10B8",
+            "serial":serial, "vendor":vendor, "tran":transport, "rota":true
+        }]}))
+        .unwrap(),
+    )
+    .unwrap()
+    .remove(0)
+}
+
+#[test]
+fn wd_usb_hex_serial_matches_smart_without_changing_raw_identity() {
+    let d = wd_usb_discovery("WD", "usb", "575844314536344350393444");
+    let snapshot = smart::parse(&serde_json::to_vec(&usb_smart_json()).unwrap(), 4).unwrap();
+    assert!(smart::identity_mismatch(&d, &snapshot).is_none());
+    let mut state = State::default();
+    let mut topology = vec![];
+    let (tx, _) = mpsc::channel(32);
+    let cfg = Config::default();
+    for _ in 0..2 {
+        apply_scan(
+            &mut state,
+            Scan::Inventory(vec![d.clone()]),
+            &mut topology,
+            &cfg,
+            &tx,
+        );
+        apply_scan(
+            &mut state,
+            Scan::Disk(
+                d.clone(),
+                Ok(smart::Reading::Checked(Box::new(snapshot.clone()))),
+            ),
+            &mut topology,
+            &cfg,
+            &tx,
+        );
+        assert_eq!(state.disks.len(), 1);
+        let disk = state.disks.values().next().unwrap();
+        assert_eq!(disk.check_status, state::CheckStatus::Checked);
+        assert_eq!(disk.health(), "OK");
+        assert_eq!(disk.device.serial, "575844314536344350393444");
+        assert_eq!(disk.snapshot.as_ref().unwrap().serial, "WD-WXD1E64CP94D");
+    }
+}
+
+#[test]
+fn wd_usb_different_serial_remains_identity_race() {
+    let d = wd_usb_discovery("WD", "usb", "575844314536344350393444");
+    let mut snapshot = smart::parse(&serde_json::to_vec(&usb_smart_json()).unwrap(), 4).unwrap();
+    snapshot.serial = "WD-WXD1E64CP94E".into();
+    assert!(
+        smart::identity_mismatch(&d, &snapshot)
+            .unwrap()
+            .contains("serial")
+    );
+    let mut state = State::default();
+    let (tx, _) = mpsc::channel(8);
+    assert!(apply_result(
+        &mut state,
+        d.clone(),
+        Ok(smart::Reading::Checked(Box::new(snapshot))),
+        &Config::default(),
+        &tx
+    ));
+    assert_eq!(
+        state.disks[&d.key()].check_status,
+        state::CheckStatus::StaleRace
+    );
+    assert!(state.disks[&d.key()].snapshot.is_none());
+}
+
+#[test]
+fn wd_usb_normalization_does_not_apply_to_other_devices_or_bad_hex() {
+    let snapshot = smart::parse(&serde_json::to_vec(&usb_smart_json()).unwrap(), 4).unwrap();
+    for (vendor, transport) in [("Seagate", "usb"), ("WD", "sata"), ("", "usb"), ("WD", "")] {
+        let d = wd_usb_discovery(vendor, transport, "575844314536344350393444");
+        assert!(smart::identity_mismatch(&d, &snapshot).is_some());
+        let d = wd_usb_discovery(vendor, transport, "WXD1E64CP94D");
+        assert!(smart::identity_mismatch(&d, &snapshot).is_some());
+    }
+    for serial in [
+        "57584431453634435039344",
+        "57584431453634435039344G",
+        "00575844314536344350393444",
+        "ff",
+        "57442d",
+    ] {
+        let d = wd_usb_discovery("WD", "usb", serial);
+        assert!(smart::identity_mismatch(&d, &snapshot).is_some());
+    }
+    let d = wd_usb_discovery("WD", "usb", "WXD1E64CP94D");
+    assert!(smart::identity_mismatch(&d, &snapshot).is_none());
+}
+
+#[test]
+fn smartctl_72_attribute_based_health_warning_is_usable() {
+    // The service journal shows only this warning in smartctl.messages,
+    // not the human-readable missing-ATA-registers diagnostic.
+    for passed in [true, false] {
+        let mut json = usb_smart_json();
+        json["smartctl"]["messages"] = serde_json::json!([{
+            "severity":"warning", "string":"Warning: This result is based on an Attribute check."
+        }]);
+        json["smart_status"]["passed"] = passed.into();
+        let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 4).unwrap();
+        assert!(snapshot.issue.is_none());
+        assert_eq!(snapshot.passed, Some(passed));
+        assert_eq!(snapshot.counters["Current_Pending_Sector"], 0);
+        let d = wd_usb_discovery("WD", "usb", "575844314536344350393444");
+        let mut state = State::default();
+        let (tx, _) = mpsc::channel(32);
+        assert!(!apply_result(
+            &mut state,
+            d.clone(),
+            Ok(smart::Reading::Checked(Box::new(snapshot))),
+            &Config::default(),
+            &tx
+        ));
+        assert_eq!(
+            state.disks[&d.key()].check_status,
+            state::CheckStatus::Checked
+        );
+        assert_eq!(
+            state.disks[&d.key()].health(),
+            if passed { "OK" } else { "Critical" }
+        );
+        for invalid in [
+            "missing_health",
+            "no_attributes",
+            "other_error",
+            "open_error",
+        ] {
+            let mut bad = json.clone();
+            match invalid {
+                "missing_health" => {
+                    bad.as_object_mut().unwrap().remove("smart_status");
+                }
+                "no_attributes" => {
+                    bad["ata_smart_attributes"]["table"] = serde_json::json!([]);
+                }
+                "other_error" => {
+                    bad["smartctl"]["messages"].as_array_mut().unwrap().push(
+                        serde_json::json!({"severity":"error", "string":"Read SMART Data failed"}),
+                    );
+                }
+                _ => {
+                    bad["smartctl"]["exit_status"] = 6.into();
+                }
+            }
+            assert!(
+                smart::parse(&serde_json::to_vec(&bad).unwrap(), 4)
+                    .unwrap()
+                    .issue
+                    .is_some(),
+                "{invalid}"
+            );
+        }
+    }
 }

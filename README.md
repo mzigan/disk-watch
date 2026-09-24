@@ -133,7 +133,9 @@ SMART и при выборе identity. Старые общие записи `wwn
 их происхождение восстановить нельзя; потребуется ручной сброс загрязнённого state.
 Данные SMART могут дополнить отсутствующие идентификаторы. Несовпадающие serial/WWN
 или смена Linux diskseq дают `StaleRace` и Warning, без записи нового snapshot
-старому диску. Если стабильные идентификаторы недоступны, проверяется model.
+старому диску. Model сравнивается только при отсутствии serial/WWN у обоих
+источников: USB enclosure и внутренний диск могут иметь разные model names.
+Первая SMART-запись может дополнить отсутствующую identity; проверки diskseq сохраняются.
 Различия написания model при совпадающем serial/WWN не считаются заменой диска.
 
 Kernel reader использует JSON `journalctl -k -f`, cursor и структурированное время.
@@ -216,3 +218,15 @@ cargo build --release
 sudo install -m755 target/release/disk-watch /usr/local/bin/disk-watch
 sudo systemctl restart disk-watch
 ```
+Для USB bridges сообщение `SMART Status not supported: Incomplete response, ATA output registers missing`
+само по себе не делает проверку неполной, если SMART attributes прочитаны и других
+ошибок нет. Биты отказа диска сохраняются; без явного `smart_status.passed`
+результат PASSED не предполагается. Также поддерживается JSON-вариант smartctl 7.2:
+`Warning: This result is based on an Attribute check.` — только с явным
+`smart_status.passed`, прочитанными атрибутами и без других ошибок.
+
+У WD USB (`TRAN=usb`, `VENDOR=WD/WDC/Western Digital` из discovery) при сравнении
+со SMART допускается HEX → печатный ASCII для serial корпуса и удаление `WD-`.
+Остальные serial сравниваются строго. Исходные serial и ключи state не нормализуются;
+несовпадение после преобразования остаётся `StaleRace`. Старые записи без признака
+WD USB читаются с выключенным исключением до нового discovery.

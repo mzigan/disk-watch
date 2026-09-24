@@ -135,7 +135,43 @@ pub fn parse(bytes: &[u8], exit_code: i32) -> Result<Snapshot> {
         .as_u64()
         .and_then(|n| u8::try_from(n).ok())
         .unwrap_or(0);
-    let exit = ExitStatus::new(process_mask | json_mask);
+    let mut exit = ExitStatus::new(process_mask | json_mask);
+    // Some USB bridges return attributes but cannot return ATA status registers.
+    // Ignore only this specific command failure, not open/checksum/other errors.
+    let unsupported_status = |message: &Value| {
+        message["string"].as_str().is_some_and(|text| {
+            text.trim()
+                == "SMART Status not supported: Incomplete response, ATA output registers missing"
+        })
+    };
+    // smartctl 7.2 may put only the attribute-check warning in JSON.
+    let attribute_status = |message: &Value| {
+        v["smart_status"]["passed"].is_boolean()
+            && message["severity"] == "warning"
+            && message["string"].as_str().is_some_and(|text| {
+                text.trim() == "Warning: This result is based on an Attribute check."
+            })
+    };
+    let status_limitation =
+        |message: &Value| unsupported_status(message) || attribute_status(message);
+    if exit.mask & 7 == 4
+        && v["ata_smart_attributes"]["table"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["name"].is_string() && row["raw"]["value"].is_u64())
+            })
+        && v["smartctl"]["messages"]
+            .as_array()
+            .is_some_and(|messages| {
+                messages.iter().any(status_limitation)
+                    && messages
+                        .iter()
+                        .all(|m| status_limitation(m) || m["severity"] == "info")
+            })
+    {
+        exit.incomplete = false;
+    }
     let usable = [
         "smart_status",
         "ata_smart_attributes",
@@ -268,7 +304,7 @@ pub fn identity_mismatch(d: &Device, s: &Snapshot) -> Option<String> {
             .replace([':', ' '], "")
             .to_ascii_lowercase()
     };
-    if serial_known && d.serial != s.serial {
+    if serial_known && !d.matches_smart_serial(&s.serial) {
         Some(format!(
             "serial changed during check: {:?} -> {:?}",
             d.serial, s.serial
@@ -278,8 +314,12 @@ pub fn identity_mismatch(d: &Device, s: &Snapshot) -> Option<String> {
             "WWN changed during check: {:?} -> {:?}",
             d.wwn, s.wwn
         ))
-    } else if !serial_known
-        && !wwn_known
+    // Model is a last resort only when neither source provides a stable ID.
+    // A first SMART read may identify the drive inside an unnamed USB enclosure.
+    } else if d.serial.is_empty()
+        && s.serial.is_empty()
+        && nonzero_wwn(&d.wwn).is_none()
+        && nonzero_wwn(&s.wwn).is_none()
         && !d.model.is_empty()
         && !s.model.is_empty()
         && d.model != s.model

@@ -22,6 +22,9 @@ pub struct Device {
     pub diskseq: Option<u64>,
     #[serde(default)]
     pub discovered_at: u64,
+    // Only discovery-confirmed WD USB devices may use the serial encoding exception.
+    #[serde(default)]
+    pub wd_usb: bool,
 }
 /// Treat an all-zero WWN (including common display formats) as unavailable.
 /// Keep the existing string representation for valid identifiers and state keys.
@@ -37,6 +40,37 @@ pub fn nonzero_wwn(value: &str) -> Option<&str> {
         .then_some(value)
 }
 impl Device {
+    pub fn matches_smart_serial(&self, serial: &str) -> bool {
+        if self.serial == serial {
+            return true;
+        }
+        if !self.wd_usb {
+            return false;
+        }
+        let raw = self.serial.as_bytes();
+        let decoded = if !raw.is_empty()
+            && raw.len().is_multiple_of(2)
+            && raw.iter().all(u8::is_ascii_hexdigit)
+        {
+            let bytes: Vec<u8> = raw
+                .chunks_exact(2)
+                .map(|pair| {
+                    let high = (pair[0] as char).to_digit(16).unwrap() as u8;
+                    let low = (pair[1] as char).to_digit(16).unwrap() as u8;
+                    high * 16 + low
+                })
+                .collect();
+            if !bytes.iter().all(u8::is_ascii_graphic) {
+                return false;
+            }
+            String::from_utf8(bytes).expect("validated ASCII serial")
+        } else {
+            self.serial.clone()
+        };
+        let discovery = decoded.strip_prefix("WD-").unwrap_or(&decoded);
+        let smart = serial.strip_prefix("WD-").unwrap_or(serial);
+        !discovery.is_empty() && discovery == smart
+    }
     /// Match persisted ownership only by a stable identity, never by a device path.
     pub fn same_identity(&self, other: &Self) -> bool {
         if !self.serial.is_empty() && !other.serial.is_empty() && self.serial != other.serial {
@@ -130,6 +164,11 @@ pub fn parse(data: &[u8]) -> Result<Vec<Device>> {
             aliases: vec![],
             diskseq: None,
             discovered_at: crate::alert::now(),
+            wd_usb: string(row, "tran") == "usb"
+                && matches!(
+                    string(row, "vendor").as_str(),
+                    "WD" | "WDC" | "Western Digital"
+                ),
         });
         d.aliases.push(name.to_owned());
         if let Some(c) = nvme {
@@ -146,7 +185,7 @@ pub async fn discover(timeout: u64) -> Result<Vec<Device>> {
             "--paths",
             "--nodeps",
             "--output",
-            "NAME,TYPE,MODEL,SERIAL,WWN,ROTA,TRAN",
+            "NAME,TYPE,MODEL,SERIAL,WWN,ROTA,TRAN,VENDOR",
         ],
         timeout,
     )
