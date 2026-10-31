@@ -151,8 +151,11 @@ fn apply_result(
         .disks
         .entry(device.key())
         .or_insert_with(|| DiskState::new(device.clone()));
+    // An in-flight result must not resurrect a disk removed by inventory.
+    if !entry.present {
+        return false;
+    }
     entry.device = device.clone();
-    entry.present = true;
     let mut events = vec![];
     let mut race = false;
     match result {
@@ -244,6 +247,7 @@ fn apply_result(
             race = true;
         }
     }
+    entry.recover_kernel();
     for event in events {
         publish(state, tx, event, true);
     }
@@ -371,6 +375,17 @@ fn apply_kernel(
             .disks
             .entry(d.key())
             .or_insert_with(|| DiskState::new(d.clone()));
+        entry.kernel_current_severity = Some(
+            entry
+                .active_kernel_severity()
+                .unwrap_or(Severity::Info)
+                .max(severity),
+        );
+        entry.kernel_recovery_successes = 0;
+        entry.kernel_last_category = Some(event.category.clone());
+        if severity == Severity::Critical {
+            entry.kernel_last_critical = Some(event.clone());
+        }
         entry.kernel_severity = Some(
             entry
                 .kernel_severity
@@ -539,7 +554,9 @@ fn status_summary(state: &State) -> String {
             if d.smart_error.is_some() && check.is_none() {
                 reason("smart_error", "yes".into(), false);
             }
-            if d.kernel_severity.is_some_and(|s| s != Severity::Info) {
+            if d.active_kernel_severity()
+                .is_some_and(|s| s != Severity::Info)
+            {
                 reason("kernel_io_errors", "yes".into(), false);
             }
         }
@@ -613,10 +630,20 @@ fn display(state: &State) {
         }
         if let Some(m) = &d.kernel_last_message {
             println!(
-                "  kernel I/O errors observed (historical, {:?}): {}",
+                "  historical kernel errors: yes\n  last kernel error (Unix seconds): {:?}\n  last kernel error category: {}\n  last kernel error message: {}\n  recovery checks since last kernel error: {}",
                 d.kernel_last_seen,
-                escaped(m)
+                escaped(d.kernel_last_category.as_deref().unwrap_or("unknown")),
+                escaped(m),
+                d.kernel_recovery_successes
             );
+            if let Some(critical) = &d.kernel_last_critical {
+                println!(
+                    "  last kernel Critical (Unix seconds): {}\n  last kernel Critical category: {}\n  last kernel Critical message: {}",
+                    critical.timestamp,
+                    escaped(&critical.category),
+                    escaped(&critical.message)
+                );
+            }
         }
     }
     if !state.recent_alerts.is_empty() {

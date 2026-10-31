@@ -366,3 +366,26 @@ fn absent_disk_history_is_only_shown_in_verbose_status() {
     assert!(full.contains("I/O error, dev sdb, sector 123"));
     assert_eq!(fs::read(&path).unwrap(), saved);
 }
+
+#[test]
+fn recovered_status_is_ok_but_verbose_keeps_kernel_evidence() {
+    let env = Sandbox::new();
+    assert!(env.command("check").output().unwrap().status.success());
+    env.script("journalctl", "#!/bin/sh\nexit 0\n");
+    for _ in 0..3 {
+        assert!(env.command("check").output().unwrap().status.success());
+    }
+    let status = env.command("status").output().unwrap();
+    assert!(status.status.success());
+    let text = String::from_utf8(status.stdout).unwrap();
+    assert!(text.contains("All disks OK"));
+    assert!(!text.contains("kernel_io_errors=yes"));
+    let verbose = env.command("status").arg("--verbose").output().unwrap();
+    assert!(verbose.status.success());
+    let text = String::from_utf8(verbose.stdout).unwrap();
+    assert!(text.contains("health: OK"));
+    assert!(text.contains("historical kernel errors: yes"));
+    assert!(text.contains("last kernel error category: kernel_io_error"));
+    assert!(text.contains("I/O error, dev sdb, sector 123"));
+    assert!(text.contains("recovery checks since last kernel error: 3"));
+}

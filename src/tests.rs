@@ -1799,3 +1799,217 @@ fn smartctl_72_attribute_based_health_warning_is_usable() {
         }
     }
 }
+
+fn recovery_clean(d: &Device) -> smart::Snapshot {
+    smart::Snapshot {
+        model: d.model.clone(),
+        serial: d.serial.clone(),
+        wwn: d.wwn.clone(),
+        passed: Some(true),
+        ..Default::default()
+    }
+}
+fn recovery_check(state: &mut State, d: &Device, reading: Result<smart::Reading>) {
+    let (tx, _) = mpsc::channel(32);
+    apply_result(state, d.clone(), reading, &Config::default(), &tx);
+}
+fn recovery_event(state: &mut State, d: Option<&Device>, message: &str) {
+    let (tx, _) = mpsc::channel(32);
+    apply_kernel(
+        state,
+        kernel::parse(
+            &serde_json::json!({"MESSAGE":message,"__REALTIME_TIMESTAMP":"123000000"}).to_string(),
+        )
+        .unwrap(),
+        d,
+        &Config::default(),
+        &tx,
+    );
+}
+#[test]
+fn kernel_recovery_requires_three_checks_and_keeps_history_across_restart() {
+    for message in ["I/O error, dev sdb", "ata2: failed command: READ DMA"] {
+        let mut state = State::default();
+        let d = device();
+        recovery_check(
+            &mut state,
+            &d,
+            Ok(smart::Reading::Checked(Box::new(recovery_clean(&d)))),
+        );
+        recovery_event(&mut state, Some(&d), message);
+        let initial_health = if message.starts_with("I/O") {
+            "Critical"
+        } else {
+            "Warning"
+        };
+        assert_eq!(state.disks[&d.key()].health(), initial_health);
+        let dir = temp();
+        let path = dir.join("state.json");
+        for count in 1..=3 {
+            recovery_check(
+                &mut state,
+                &d,
+                Ok(smart::Reading::Checked(Box::new(recovery_clean(&d)))),
+            );
+            assert_eq!(state.disks[&d.key()].kernel_recovery_successes, count);
+            assert_eq!(
+                state.disks[&d.key()].health(),
+                if count == 3 { "OK" } else { initial_health }
+            );
+            state.save(&path).unwrap();
+            state = state::read(&path).unwrap();
+            state.prepare_boot(Some(format!("boot-{count}")));
+            assert_eq!(state.disks[&d.key()].kernel_recovery_successes, count);
+        }
+        let disk = &state.disks[&d.key()];
+        assert_eq!(disk.kernel_last_message.as_deref(), Some(message));
+        assert_eq!(disk.kernel_last_seen, Some(123));
+        assert!(disk.kernel_last_category.is_some());
+        if initial_health == "Critical" {
+            let critical = disk.kernel_last_critical.as_ref().unwrap();
+            assert_eq!(critical.disk.as_ref().unwrap().key(), d.key());
+            assert_eq!(critical.timestamp, 123);
+        }
+        assert!(status_summary(&state).contains("All disks OK"));
+        // After recovery a new Warning is a Warning, not the historical Critical.
+        recovery_event(&mut state, Some(&d), "ata2: timeout");
+        assert_eq!(state.disks[&d.key()].health(), "Warning");
+        assert_eq!(state.disks[&d.key()].kernel_recovery_successes, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+#[test]
+fn new_kernel_problems_reset_only_the_matched_disks_recovery() {
+    let mut state = State::default();
+    let d = device();
+    let mut other = d.clone();
+    other.serial = "OTHER".into();
+    recovery_event(&mut state, Some(&d), "I/O error");
+    for _ in 0..2 {
+        recovery_check(
+            &mut state,
+            &d,
+            Ok(smart::Reading::Checked(Box::new(recovery_clean(&d)))),
+        );
+    }
+    recovery_event(&mut state, None, "I/O error");
+    recovery_event(&mut state, Some(&other), "I/O error");
+    assert_eq!(state.disks[&d.key()].kernel_recovery_successes, 2);
+    for message in ["I/O error", "ata2: timeout"] {
+        recovery_event(&mut state, Some(&d), message);
+        assert_eq!(state.disks[&d.key()].kernel_recovery_successes, 0);
+        assert_eq!(state.disks[&d.key()].health(), "Critical");
+    }
+    assert_eq!(
+        state.disks[&d.key()]
+            .kernel_last_critical
+            .as_ref()
+            .unwrap()
+            .message,
+        "I/O error"
+    );
+}
+#[test]
+fn non_clean_checks_cannot_recover_kernel_alarm() {
+    for kind in [
+        "failed", "sleeping", "partial", "unknown", "race", "warning", "critical",
+    ] {
+        let d = device();
+        let mut state = State::default();
+        recovery_event(&mut state, Some(&d), "I/O error");
+        for _ in 0..2 {
+            recovery_check(
+                &mut state,
+                &d,
+                Ok(smart::Reading::Checked(Box::new(recovery_clean(&d)))),
+            );
+        }
+        let mut snapshot = recovery_clean(&d);
+        let result = match kind {
+            "failed" => Err(anyhow::anyhow!("failed")),
+            "sleeping" => Ok(smart::Reading::Sleeping),
+            _ => {
+                match kind {
+                    "partial" => snapshot.issue = Some("incomplete".into()),
+                    "unknown" => snapshot.passed = None,
+                    "race" => snapshot.serial = "REPLACED".into(),
+                    "warning" => {
+                        snapshot.counters.insert("UDMA_CRC_Error_Count".into(), 1);
+                    }
+                    _ => {
+                        snapshot.counters.insert("Current_Pending_Sector".into(), 1);
+                    }
+                }
+                Ok(smart::Reading::Checked(Box::new(snapshot)))
+            }
+        };
+        recovery_check(&mut state, &d, result);
+        assert_eq!(state.disks[&d.key()].kernel_recovery_successes, 0, "{kind}");
+        assert_eq!(state.disks[&d.key()].health(), "Critical");
+    }
+}
+#[test]
+fn recovery_follows_identity_and_pauses_while_absent() {
+    for wwn in ["", "50014ee6af899d10"] {
+        let mut d = device();
+        d.wwn = wwn.into();
+        let mut state = State::default();
+        recovery_event(&mut state, Some(&d), "I/O error");
+        recovery_check(
+            &mut state,
+            &d,
+            Ok(smart::Reading::Checked(Box::new(recovery_clean(&d)))),
+        );
+        let (tx, _) = mpsc::channel(32);
+        apply_inventory(&mut state, &[], &Config::default(), &tx);
+        let before = serde_json::to_value(&state.disks).unwrap();
+        recovery_check(
+            &mut state,
+            &d,
+            Ok(smart::Reading::Checked(Box::new(recovery_clean(&d)))),
+        );
+        assert_eq!(serde_json::to_value(&state.disks).unwrap(), before);
+        d.path = "/dev/sdd".into();
+        apply_inventory(&mut state, &[d.clone()], &Config::default(), &tx);
+        for _ in 0..2 {
+            recovery_check(
+                &mut state,
+                &d,
+                Ok(smart::Reading::Checked(Box::new(recovery_clean(&d)))),
+            );
+        }
+        assert_eq!(state.disks.len(), 1);
+        assert_eq!(state.disks[&d.key()].health(), "OK");
+        assert!(state.disks[&d.key()].kernel_last_message.is_some());
+    }
+}
+#[test]
+fn legacy_kernel_alarm_stays_active_until_recovery() {
+    let mut state = summary_ok_disks(1);
+    let disk = state.disks.values_mut().next().unwrap();
+    disk.kernel_severity = Some(Severity::Critical);
+    disk.kernel_last_message = Some("old kernel error".into());
+    let mut value = serde_json::to_value(&state).unwrap();
+    for disk in value["disks"].as_object_mut().unwrap().values_mut() {
+        for field in [
+            "kernel_current_severity",
+            "kernel_last_category",
+            "kernel_last_critical",
+            "kernel_recovery_successes",
+        ] {
+            disk.as_object_mut().unwrap().remove(field);
+        }
+    }
+    let dir = temp();
+    let path = dir.join("state.json");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let loaded = state::read(&path).unwrap();
+    let disk = loaded.disks.values().next().unwrap();
+    assert_eq!(disk.health(), "Critical");
+    assert_eq!(disk.kernel_recovery_successes, 0);
+    assert_eq!(
+        disk.kernel_last_message.as_deref(),
+        Some("old kernel error")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

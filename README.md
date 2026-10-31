@@ -170,6 +170,18 @@ State хранит cursor, boot id, последние 2048 cursor и monotonic 
 Старые snapshots сохраняются, но до новой проверки не объявляются свежими.
 При повреждении state выводится Warning и начинается пустая история.
 Диски и последние 100 alerts сохраняются; historical kernel severity сама не исчезает.
+Текущая kernel Warning/Critical снимается после **3 последовательных чистых SMART
+checks** для той же стабильной identity: `Checked`, известный SMART health без
+Warning/Critical, `present=true`. Sleeping, failed, partial, unknown, identity race
+или проблемный SMART прерывают серию. Новый kernel Warning/Critical сбрасывает
+счётчик; uncorrelated события на recovery дисков не влияют.
+Отсутствие диска приостанавливает recovery; после возвращения нужны новые checks.
+Reboot и чтение status не выполняют recovery. Прогресс сохраняется в state; старый
+state загружается с активной тревогой и нулём успешных checks.
+`status` использует current health. `status --verbose` сохраняет historical kernel
+errors, время (Unix seconds), категорию, сообщение, последний Critical и счётчик
+recovery. Recovery означает лишь отсутствие новых наблюдаемых ошибок, а не
+доказательство физического ремонта.
 Для ручного сброса остановите сервис и переместите state в резервную копию.
 
 В daemon единственный writer получает последний snapshot примерно раз в 2 секунды.

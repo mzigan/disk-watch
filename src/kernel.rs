@@ -84,6 +84,9 @@ pub fn classify(message: &str) -> Option<(Severity, &'static str)> {
             || s == "blk"
             || s == "block"
     });
+    if storage && lower.contains("link down") {
+        return Some((Severity::Critical, "link_reset"));
+    }
     if storage && lower.contains("failed command") {
         return Some((Severity::Warning, "failed_command"));
     }
