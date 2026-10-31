@@ -389,3 +389,65 @@ fn recovered_status_is_ok_but_verbose_keeps_kernel_evidence() {
     assert!(text.contains("I/O error, dev sdb, sector 123"));
     assert!(text.contains("recovery checks since last kernel error: 3"));
 }
+
+#[test]
+fn events_after_recovery_are_local_limited_and_read_only() {
+    let env = Sandbox::new();
+    assert!(env.command("check").output().unwrap().status.success());
+    env.script("journalctl", "#!/bin/sh\nexit 0\n");
+    for _ in 0..3 {
+        assert!(env.command("check").output().unwrap().status.success());
+    }
+    let path = env.root.join("state.json");
+    let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for event in state["recent_alerts"].as_array_mut().unwrap() {
+        event["timestamp"] = if event["category"] == "kernel_io_error" {
+            10
+        } else {
+            0
+        }
+        .into();
+    }
+    state["disks"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap()["device"]["path"] = "/dev/sdz".into();
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    for program in ["lsblk", "smartctl", "journalctl"] {
+        env.script(
+            program,
+            "#!/bin/sh\ntouch \"$DISK_WATCH_SCAN_MARKER\"\nexit 99\n",
+        );
+    }
+    let marker = env.root.join("scan-called");
+    let run = |limit: Option<&str>| {
+        let mut cmd = env.command("events");
+        cmd.env("TZ", "Europe/Moscow")
+            .env("DISK_WATCH_SCAN_MARKER", &marker);
+        if let Some(limit) = limit {
+            cmd.args(["--limit", limit]);
+        }
+        let result = cmd.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap()
+    };
+    let all = run(None);
+    assert!(all.starts_with("DISK EVENTS\n"));
+    assert!(all.contains("1970-01-01 03:00:10 +03:00  CRITICAL"));
+    assert!(all.contains("Patriot P210 512GB serial=SSD-TEST1"));
+    assert!(all.contains("/dev/sdz"));
+    assert!(all.contains("I/O error, dev sdb, sector 123"));
+    let limited = run(Some("1"));
+    assert!(limited.contains("kernel_io_error"));
+    assert!(!limited.contains("new disk discovered"));
+    assert_eq!(run(Some("0")), "DISK EVENTS\n");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(!marker.exists());
+}

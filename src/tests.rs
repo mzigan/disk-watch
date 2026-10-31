@@ -2013,3 +2013,63 @@ fn legacy_kernel_alarm_stays_active_until_recovery() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn saved_events_sort_by_time_and_resolve_current_path_by_identity() {
+    let mut state = State::default();
+    let d = device();
+    let mut current = d.clone();
+    current.path = "/dev/sdz".into();
+    state.disks.insert(current.key(), DiskState::new(current));
+    let mut old = Event::new(
+        Severity::Critical,
+        Some(&d),
+        "kernel_io_error",
+        "OLD I/O error, dev sdb",
+    );
+    old.timestamp = 10;
+    let mut new = Event::new(Severity::Warning, Some(&d), "kernel_timeout", "NEW timeout");
+    new.timestamp = 30;
+    let mut uncorrelated = Event::new(
+        Severity::Critical,
+        None,
+        "kernel_link_reset",
+        "UNCORRELATED reset",
+    );
+    uncorrelated.timestamp = 20;
+    // Insertion order need not match wall-clock order after replay/clock changes.
+    state.recent_alerts = vec![new, old, uncorrelated];
+    let before = serde_json::to_value(&state).unwrap();
+    let output = event_history(&state, 50);
+    assert!(output.find("NEW timeout").unwrap() < output.find("UNCORRELATED reset").unwrap());
+    assert!(output.find("UNCORRELATED reset").unwrap() < output.find("OLD I/O").unwrap());
+    assert!(output.contains("WARNING  Test serial=SERIAL"));
+    assert!(output.contains("CRITICAL  uncorrelated"));
+    assert!(output.contains("/dev/sdz"));
+    assert!(!output.contains("/dev/sdb (at event)"));
+    assert!(!event_history(&state, 1).contains("OLD I/O"));
+    assert_eq!(event_history(&state, 0), "DISK EVENTS\n");
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    state.disks.values_mut().next().unwrap().present = false;
+    let output = event_history(&state, 50);
+    assert!(output.contains("/dev/sdb (at event)"));
+    assert!(!output.contains("/dev/sdz"));
+}
+
+#[test]
+fn saved_events_escape_external_text_and_handle_invalid_timestamp() {
+    let mut state = State::default();
+    let mut event = Event::new(
+        Severity::Critical,
+        None,
+        "kernel_io_error",
+        "bad\nFORGED\u{1b}[31m",
+    );
+    event.timestamp = u64::MAX;
+    state.recent_alerts.push(event);
+    let output = event_history(&state, 20);
+    assert!(output.contains("invalid timestamp"));
+    assert!(!output.contains("\nFORGED"));
+    assert!(!output.contains('\u{1b}'));
+    assert!(event_history(&State::default(), 20).contains("No saved disk events."));
+}

@@ -38,6 +38,8 @@ sudo disk-watch devices
 sudo disk-watch check
 sudo disk-watch status
 sudo disk-watch status --verbose # подробности и Recent events
+sudo disk-watch events
+sudo disk-watch events --limit 50
 sudo disk-watch daemon
 sudo disk-watch --config ./packaging/config.toml --state /tmp/disk-watch/state.json check
 ```
@@ -54,6 +56,13 @@ sudo disk-watch --config ./packaging/config.toml --state /tmp/disk-watch/state.j
   без обращения к накопителям, включая возраст данных через
   время последней успешной SMART-проверки в Unix seconds. Это исторический snapshot,
   а не подтверждение работы демона или свежести показателей прямо сейчас.
+- `events`: сохранённые Recent events, новые по времени первыми (default limit 20).
+  `events --limit 50` меняет лимит. Показываются локальное время с UTC offset,
+  severity, model/serial/WWN, category и сообщение. Текущий путь берётся из state
+  только при совпадении identity; иначе путь события помечен `(at event)`.
+  `uncorrelated` события так и отображаются. Команда не запускает SMART/journal,
+  не изменяет state и не удаляет события после recovery. Список ограничен
+  сохранёнными 100 alerts; это не полный архив kernel journal.
 - `daemon`: SMART/discovery по таймеру и непрерывный kernel journal.
 
 `check` и `daemon` блокируют один lock рядом со state. При работающем сервисе

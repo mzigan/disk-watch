@@ -30,6 +30,11 @@ enum Action {
     Daemon,
     Check,
     Devices,
+    /// Show saved disk events, newest first, without scanning devices or journal.
+    Events {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     Status {
         /// Include detailed disk status and recent events after the summary.
         #[arg(long)]
@@ -663,6 +668,53 @@ fn display(state: &State) {
         );
     }
 }
+fn event_history(state: &State, limit: usize) -> String {
+    let mut events: Vec<_> = state.recent_alerts.iter().rev().collect();
+    events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+    let mut out = String::from("DISK EVENTS\n");
+    if events.is_empty() {
+        out.push_str("\nNo saved disk events.\n");
+    }
+    for event in events.into_iter().take(limit) {
+        let time = i64::try_from(event.timestamp)
+            .ok()
+            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S %:z")
+                    .to_string()
+            })
+            .unwrap_or_else(|| format!("invalid timestamp ({})", event.timestamp));
+        let severity = format!("{:?}", event.severity).to_uppercase();
+        out.push_str(&format!("\n{time}  {severity}  "));
+        if let Some(d) = &event.disk {
+            out.push_str(&escaped(&d.model));
+            if !d.serial.is_empty() {
+                out.push_str(&format!(" serial={}", escaped(&d.serial)));
+            }
+            if let Some(wwn) = nonzero_wwn(&d.wwn) {
+                out.push_str(&format!(" wwn={}", escaped(wwn)));
+            }
+            let current = state
+                .disks
+                .get(&d.key())
+                .filter(|current| current.present && current.device.same_identity(d));
+            if let Some(current) = current {
+                out.push_str(&format!("\n  {}", escaped(&current.device.path)));
+            } else {
+                out.push_str(&format!("\n  {} (at event)", escaped(&d.path)));
+            }
+        } else {
+            out.push_str("uncorrelated\n ");
+        }
+        out.push_str(&format!(
+            "  {}: {}\n",
+            escaped(&event.category),
+            escaped(&event.message)
+        ));
+    }
+    out
+}
 fn escaped(s: &str) -> String {
     s.chars().flat_map(char::escape_default).collect()
 }
@@ -800,6 +852,10 @@ async fn main() -> Result<()> {
             .unwrap_or(std::path::Path::new("/etc/disk-watch/config.toml")),
         cli.config.is_some(),
     )?;
+    if let Action::Events { limit } = cli.command {
+        print!("{}", event_history(&State::load(&cli.state), limit));
+        return Ok(());
+    }
     if let Action::Status { verbose, .. } = cli.command {
         let state = State::load(&cli.state);
         print!("{}", status_summary(&state));
