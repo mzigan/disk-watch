@@ -36,6 +36,14 @@ pub struct DiskState {
     pub kernel_severity: Option<Severity>,
     pub kernel_last_message: Option<String>,
     pub kernel_last_seen: Option<u64>,
+    #[serde(default)]
+    pub kernel_last_category: Option<String>,
+    #[serde(default)]
+    pub kernel_last_critical: Option<Event>,
+    #[serde(default)]
+    pub kernel_current_severity: Option<Severity>,
+    #[serde(default)]
+    pub kernel_recovery_successes: u8,
 }
 impl DiskState {
     pub fn new(device: Device) -> Self {
@@ -50,10 +58,40 @@ impl DiskState {
             kernel_severity: None,
             kernel_last_message: None,
             kernel_last_seen: None,
+            kernel_last_category: None,
+            kernel_last_critical: None,
+            kernel_current_severity: None,
+            kernel_recovery_successes: 0,
         }
     }
+    pub fn active_kernel_severity(&self) -> Option<Severity> {
+        if self.kernel_recovery_successes >= 3 {
+            None
+        } else {
+            // Old state has no current field: keep its alarm until recovery checks.
+            self.kernel_current_severity.or(self.kernel_severity)
+        }
+    }
+    pub fn recover_kernel(&mut self) {
+        if !self.present || self.active_kernel_severity().is_none() {
+            return;
+        }
+        let clean = self.device.same_identity(&self.device)
+            && self.check_status == CheckStatus::Checked
+            && self.snapshot.as_ref().is_some_and(|s| !s.unknown())
+            && self.smart_severity() == Severity::Info;
+        self.kernel_recovery_successes = if clean {
+            (self.kernel_recovery_successes + 1).min(3)
+        } else {
+            0
+        };
+    }
     pub fn severity(&self) -> Severity {
-        let mut severity = self.kernel_severity.unwrap_or(Severity::Info);
+        self.smart_severity()
+            .max(self.active_kernel_severity().unwrap_or(Severity::Info))
+    }
+    fn smart_severity(&self) -> Severity {
+        let mut severity = Severity::Info;
         if self.hot || self.smart_error.is_some() {
             severity = severity.max(Severity::Warning);
         }
@@ -85,7 +123,7 @@ impl DiskState {
         severity
     }
     pub fn health(&self) -> &'static str {
-        if self.kernel_severity == Some(Severity::Critical) {
+        if self.active_kernel_severity() == Some(Severity::Critical) {
             return "Critical";
         }
         let fresh_critical = matches!(
