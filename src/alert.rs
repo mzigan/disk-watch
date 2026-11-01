@@ -97,6 +97,46 @@ pub fn diff(
             );
         }
     }
+    // The compatibility CRC indicator is max(known sources). A larger ID 218
+    // must not hide growth of ID 199 below that maximum. ID 218 has its own
+    // vendor_crc_errors indicator and is already compared in the loop above.
+    if new
+        .counter_sources
+        .get("UDMA_CRC_Error_Count")
+        .is_some_and(|ids| ids.contains(&199))
+        && let Some(current) = new
+            .ata_attributes
+            .iter()
+            .find(|a| a.id == 199 && a.state == crate::smart::AttributeState::Available)
+            .and_then(|a| a.scalar_value())
+    {
+        let before = old
+            .and_then(|s| {
+                s.ata_attributes
+                    .iter()
+                    .find(|a| a.id == 199 && a.state != crate::smart::AttributeState::ReadError)
+            })
+            .and_then(|a| a.scalar_value())
+            .unwrap_or(0);
+        let old_indicator = old
+            .and_then(|s| s.counters.get("UDMA_CRC_Error_Count"))
+            .copied()
+            .unwrap_or(0);
+        if current > before
+            && new
+                .counters
+                .get("UDMA_CRC_Error_Count")
+                .is_some_and(|value| *value <= old_indicator)
+        {
+            emit(
+                Severity::Warning,
+                "UDMA_CRC_Error_Count",
+                format!(
+                    "ATA 199 CRC count changed {before} -> {current}; compatibility indicator unchanged"
+                ),
+            );
+        }
+    }
     let checks = [
         (
             "overall_health",

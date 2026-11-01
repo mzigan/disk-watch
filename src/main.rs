@@ -610,7 +610,16 @@ fn display(state: &State) {
                 s.power_on_hours
             );
             for (key, value) in &s.counters {
-                println!("  {key}: {value}");
+                if s.attribute_state(key) == smart::AttributeState::Unsupported {
+                    println!("  {key}: Unsupported (last known: {value})");
+                } else {
+                    println!("  {key}: {value} ({:?})", s.attribute_state(key));
+                }
+            }
+            for (key, state) in &s.attribute_states {
+                if !s.counters.contains_key(key) {
+                    println!("  {key}: {state:?}");
+                }
             }
             if d.device.kind == devices::Kind::Nvme {
                 println!(

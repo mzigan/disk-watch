@@ -1,0 +1,294 @@
+{
+  "version": 2,
+  "disks": {
+    "wwn:0x5002538000000001": {
+      "device": {
+        "path": "/dev/sdc",
+        "model": "Samsung SSD 870 EVO 1TB",
+        "serial": "SAMSUNG-PROFILE-TEST",
+        "wwn": "0x5002538000000001",
+        "kind": "Ssd",
+        "aliases": [
+          "ata4",
+          "sdc"
+        ],
+        "diskseq": 11,
+        "discovered_at": 1793514431,
+        "wd_usb": false
+      },
+      "present": true,
+      "snapshot": {
+        "model": "Samsung SSD 870 EVO 1TB",
+        "serial": "SAMSUNG-PROFILE-TEST",
+        "wwn": "5002538000000001",
+        "firmware": "SVT03B6Q",
+        "passed": true,
+        "temperature": 27,
+        "power_on_hours": 909,
+        "counters": {
+          "Reallocated_Sector_Ct": 0,
+          "Reported_Uncorrect": 0,
+          "UDMA_CRC_Error_Count": 0
+        },
+        "unknown_attributes": {
+          "12:Power_Cycle_Count": {
+            "string": "11",
+            "value": 11
+          },
+          "177:Wear_Leveling_Count": {
+            "string": "1",
+            "value": 1
+          },
+          "179:Used_Rsvd_Blk_Cnt_Tot": {
+            "string": "0",
+            "value": 0
+          },
+          "181:Program_Fail_Cnt_Total": {
+            "string": "0",
+            "value": 0
+          },
+          "182:Erase_Fail_Count_Total": {
+            "string": "0",
+            "value": 0
+          },
+          "183:Runtime_Bad_Block": {
+            "string": "0",
+            "value": 0
+          },
+          "187:Uncorrectable_Error_Cnt": {
+            "string": "0",
+            "value": 0
+          },
+          "190:Airflow_Temperature_Cel": {
+            "string": "27",
+            "value": 27
+          },
+          "195:ECC_Error_Rate": {
+            "string": "0",
+            "value": 0
+          },
+          "235:POR_Recovery_Count": {
+            "string": "0",
+            "value": 0
+          },
+          "241:Total_LBAs_Written": {
+            "string": "2583394776",
+            "value": 2583394776
+          },
+          "252:Unknown_Attribute": {
+            "string": "0",
+            "value": 0
+          },
+          "9:Power_On_Hours": {
+            "string": "909",
+            "value": 909
+          }
+        },
+        "available_spare": null,
+        "spare_threshold": null,
+        "percentage_used": null,
+        "remaining_life": null,
+        "critical_warning": null,
+        "prefailure": false,
+        "self_test": null,
+        "self_test_hours": null,
+        "self_test_status": null,
+        "exit": {
+          "mask": 0,
+          "incomplete": false,
+          "disk_failing": false,
+          "prefailure": false,
+          "past_threshold": false,
+          "error_log": false,
+          "self_test_log": false
+        },
+        "issue": null,
+        "stale_fields": [
+          "Reported_Uncorrect"
+        ]
+      },
+      "checked_at": 1793514431,
+      "hot": false,
+      "smart_error": null,
+      "check_status": "Checked",
+      "kernel_severity": null,
+      "kernel_last_message": null,
+      "kernel_last_seen": null,
+      "kernel_last_category": null,
+      "kernel_last_critical": null,
+      "kernel_current_severity": null,
+      "kernel_recovery_successes": 0
+    },
+    "wwn:0x50026b7000000002": {
+      "device": {
+        "path": "/dev/sdf",
+        "model": "KINGSTON SM2280S3G2120G",
+        "serial": "KINGSTON-PROFILE-TEST",
+        "wwn": "0x50026b7000000002",
+        "kind": "Ssd",
+        "aliases": [
+          "ata12",
+          "sdf",
+          "sdf1",
+          "sdf2",
+          "sdf3",
+          "sdf4"
+        ],
+        "diskseq": 14,
+        "discovered_at": 1793514431,
+        "wd_usb": false
+      },
+      "present": true,
+      "snapshot": {
+        "model": "KINGSTON SM2280S3G2120G",
+        "serial": "KINGSTON-PROFILE-TEST",
+        "wwn": "50026b7000000002",
+        "firmware": "SAFM01.V",
+        "passed": true,
+        "temperature": 29,
+        "power_on_hours": 65343,
+        "counters": {
+          "Current_Pending_Sector": 0,
+          "Reallocated_Event_Count": 0,
+          "Reallocated_Sector_Ct": 0,
+          "Reported_Uncorrect": 0,
+          "UDMA_CRC_Error_Count": 0
+        },
+        "unknown_attributes": {
+          "12:Power_Cycle_Count": {
+            "string": "6731",
+            "value": 6731
+          },
+          "168:SATA_Phy_Error_Count": {
+            "string": "0",
+            "value": 0
+          },
+          "170:Bad_Blk_Ct_Lat/Erl": {
+            "string": "0/178",
+            "value": 178
+          },
+          "173:MaxAvgErase_Ct": {
+            "string": "217 (Average 147)",
+            "value": 9634009
+          },
+          "175:Not_In_Use": {
+            "string": "0",
+            "value": 0
+          },
+          "192:Unsafe_Shutdown_Count": {
+            "string": "266",
+            "value": 266
+          },
+          "194:Temperature_Celsius": {
+            "string": "29 (Min/Max 12/66)",
+            "value": 283468627997
+          },
+          "197:Not_In_Use": {
+            "string": "0",
+            "value": 0
+          },
+          "1:Raw_Read_Error_Rate": {
+            "string": "0",
+            "value": 0
+          },
+          "231:SSD_Life_Left": {
+            "string": "96",
+            "value": 96
+          },
+          "233:Flash_Writes_GiB": {
+            "string": "7668",
+            "value": 7668
+          },
+          "240:Not_In_Use": {
+            "string": "0",
+            "value": 0
+          },
+          "241:Lifetime_Writes_GiB": {
+            "string": "15721",
+            "value": 15721
+          },
+          "242:Lifetime_Reads_GiB": {
+            "string": "15649",
+            "value": 15649
+          },
+          "244:Average_Erase_Count": {
+            "string": "147",
+            "value": 147
+          },
+          "245:Max_Erase_Count": {
+            "string": "217",
+            "value": 217
+          },
+          "246:Total_Erase_Count": {
+            "string": "4984896",
+            "value": 4984896
+          },
+          "2:Not_In_Use": {
+            "string": "0",
+            "value": 0
+          },
+          "3:Not_In_Use": {
+            "string": "0",
+            "value": 0
+          },
+          "5:Retired_Block_Count": {
+            "string": "0",
+            "value": 0
+          },
+          "7:Not_In_Use": {
+            "string": "0",
+            "value": 0
+          },
+          "8:Not_In_Use": {
+            "string": "0",
+            "value": 0
+          },
+          "9:Power_On_Hours": {
+            "string": "65343",
+            "value": 65343
+          }
+        },
+        "available_spare": null,
+        "spare_threshold": null,
+        "percentage_used": null,
+        "remaining_life": 100,
+        "critical_warning": null,
+        "prefailure": false,
+        "self_test": null,
+        "self_test_hours": null,
+        "self_test_status": null,
+        "exit": {
+          "mask": 0,
+          "incomplete": false,
+          "disk_failing": false,
+          "prefailure": false,
+          "past_threshold": false,
+          "error_log": false,
+          "self_test_log": false
+        },
+        "issue": null,
+        "stale_fields": [
+          "Current_Pending_Sector",
+          "Reallocated_Sector_Ct"
+        ]
+      },
+      "checked_at": 1793514432,
+      "hot": false,
+      "smart_error": null,
+      "check_status": "Checked",
+      "kernel_severity": null,
+      "kernel_last_message": null,
+      "kernel_last_seen": null,
+      "kernel_last_category": null,
+      "kernel_last_critical": null,
+      "kernel_current_severity": null,
+      "kernel_recovery_successes": 0
+    }
+  },
+  "recent_alerts": [],
+  "kernel_cursor": null,
+  "kernel_boot_id": null,
+  "kernel_seen_cursors": [],
+  "kernel_watermark": null,
+  "notification_times": {}
+}

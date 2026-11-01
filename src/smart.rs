@@ -35,10 +35,35 @@ pub enum SelfTestStatus {
     InProgress,
     Unknown,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttributeState {
+    Available,
+    Unsupported,
+    Stale,
+    ReadError,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AtaAttribute {
+    pub id: u8,
+    pub name: String,
+    pub normalized_value: Option<u64>,
+    pub raw: Value,
+    pub state: AttributeState,
+}
+impl AtaAttribute {
+    pub fn scalar_value(&self) -> Option<u64> {
+        let value = self.raw["value"].as_u64()?;
+        self.raw["string"]
+            .as_str()
+            .is_none_or(|text| text.trim().parse::<u64>().ok() == Some(value))
+            .then_some(value)
+    }
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Snapshot {
     pub model: String,
+    pub model_family: String,
     pub serial: String,
     pub wwn: String,
     pub firmware: String,
@@ -46,6 +71,10 @@ pub struct Snapshot {
     pub temperature: Option<i64>,
     pub power_on_hours: Option<u64>,
     pub counters: BTreeMap<String, u64>,
+    pub attribute_states: BTreeMap<String, AttributeState>,
+    // Physical ATA observations remain separate from diagnostic indicators.
+    pub ata_attributes: Vec<AtaAttribute>,
+    pub counter_sources: BTreeMap<String, BTreeSet<u8>>,
     // Keep uninterpreted vendor data for inspection; it never drives health alerts.
     pub unknown_attributes: BTreeMap<String, Value>,
     pub available_spare: Option<u64>,
@@ -62,6 +91,35 @@ pub struct Snapshot {
     pub stale_fields: BTreeSet<String>,
 }
 impl Snapshot {
+    fn record_counter(&mut self, key: &str, id: u8, value: u64) {
+        // CRC is a compatibility indicator, not a replacement for either raw
+        // attribute. Max preserves alarms without adding unrelated raw counts.
+        self.counters
+            .entry(key.into())
+            .and_modify(|old| *old = (*old).max(value))
+            .or_insert(value);
+        self.counter_sources
+            .entry(key.into())
+            .or_default()
+            .insert(id);
+        if self.attribute_states.get(key) != Some(&AttributeState::ReadError) {
+            self.attribute_states
+                .insert(key.into(), AttributeState::Available);
+        }
+    }
+    pub fn attribute_state(&self, name: &str) -> AttributeState {
+        if let Some(state) = self.attribute_states.get(name) {
+            *state
+        } else if self.issue.is_some() {
+            AttributeState::ReadError
+        } else if self.stale_fields.contains(name) {
+            AttributeState::Stale
+        } else if self.counters.contains_key(name) {
+            AttributeState::Available
+        } else {
+            AttributeState::Unsupported
+        }
+    }
     /// Carry forward last-known measurements, explicitly marking them unavailable now.
     pub fn retain_missing(&mut self, old: &Self) {
         macro_rules! retain {
@@ -86,10 +144,86 @@ impl Snapshot {
             self_test_hours,
             self_test_status
         );
+        for (key, value) in &old.counters {
+            if let Some(current) = self.counters.get_mut(key) {
+                let sources = self.counter_sources.get(key);
+                let missing_source = old.counter_sources.get(key).is_some_and(|previous| {
+                    previous
+                        .iter()
+                        .any(|id| !sources.is_some_and(|now| now.contains(id)))
+                });
+                // Legacy CRC had no source IDs and was last-writer-wins. A
+                // smaller value from just one provider cannot clear old bad evidence.
+                let unconfirmed_legacy_crc = key == "UDMA_CRC_Error_Count"
+                    && *value > *current
+                    && !old.counter_sources.contains_key(key)
+                    && sources.is_some_and(|ids| !(ids.contains(&199) && ids.contains(&218)));
+                if missing_source || unconfirmed_legacy_crc {
+                    *current = (*current).max(*value);
+                    self.stale_fields.insert(key.clone());
+                    self.attribute_states.insert(
+                        key.clone(),
+                        if self.issue.is_some() {
+                            AttributeState::ReadError
+                        } else {
+                            AttributeState::Stale
+                        },
+                    );
+                    if unconfirmed_legacy_crc {
+                        // Keep the legacy provenance unknown on subsequent polls.
+                        self.counter_sources.remove(key);
+                    } else if let Some(previous) = old.counter_sources.get(key) {
+                        self.counter_sources
+                            .entry(key.clone())
+                            .or_default()
+                            .extend(previous);
+                    }
+                }
+            }
+        }
         for (name, value) in &old.counters {
             if !self.counters.contains_key(name) {
                 self.counters.insert(name.clone(), *value);
+                // Explicit Not_In_Use can explain an old zero, but must never
+                // erase a previous nonzero problem or mask a failed read.
+                if (self.attribute_states.get(name) == Some(&AttributeState::Unsupported)
+                    || old.attribute_state(name) == AttributeState::Unsupported)
+                    && *value == 0
+                    && self.issue.is_none()
+                {
+                    self.attribute_states
+                        .insert(name.clone(), AttributeState::Unsupported);
+                    continue;
+                }
                 self.stale_fields.insert(name.clone());
+                self.attribute_states.insert(
+                    name.clone(),
+                    if self.issue.is_some() {
+                        AttributeState::ReadError
+                    } else {
+                        AttributeState::Stale
+                    },
+                );
+                if let Some(sources) = old.counter_sources.get(name) {
+                    self.counter_sources.insert(name.clone(), sources.clone());
+                }
+            }
+        }
+        let fresh_ids: BTreeSet<_> = self
+            .ata_attributes
+            .iter()
+            .filter(|a| a.state == AttributeState::Available)
+            .map(|a| a.id)
+            .collect();
+        for previous in &old.ata_attributes {
+            if !fresh_ids.contains(&previous.id) && previous.state != AttributeState::ReadError {
+                let mut last_known = previous.clone();
+                last_known.state = if self.issue.is_some() {
+                    AttributeState::ReadError
+                } else {
+                    AttributeState::Stale
+                };
+                self.ata_attributes.push(last_known);
             }
         }
     }
@@ -105,18 +239,104 @@ pub enum Reading {
 fn s(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().trim().into()
 }
-fn counter_name(name: &str) -> Option<&'static str> {
-    match name {
-        "Reallocated_Sector_Ct" | "Reallocated_Sector_Count" => Some("Reallocated_Sector_Ct"),
-        "Reallocated_Event_Count" => Some("Reallocated_Event_Count"),
-        "Current_Pending_Sector" | "Pending_Sector_Count" => Some("Current_Pending_Sector"),
-        "Offline_Uncorrectable" => Some("Offline_Uncorrectable"),
-        "Reported_Uncorrect" => Some("Reported_Uncorrect"),
-        "UDMA_CRC_Error_Count" | "CRC_Error_Count" | "SATA_CRC_Error_Count" => {
+fn phison_profile(model: &str, family: &str) -> bool {
+    matches!(family, "Phison Driven SSDs" | "Phison Driven OEM SSDs")
+        || matches!(model, "Patriot Burst" | "KINGSTON SM2280S3G2120G")
+        || model
+            .strip_prefix("Patriot Burst ")
+            .is_some_and(|capacity| matches!(capacity, "120GB" | "240GB" | "480GB" | "960GB"))
+}
+fn counter_name(id: Option<u64>, name: &str, model: &str, phison: bool) -> Option<&'static str> {
+    match (id?, name) {
+        (5, "Reallocated_Sector_Ct" | "Reallocated_Sector_Count") => Some("Reallocated_Sector_Ct"),
+        (5, "Retired_Block_Count") if phison => Some("Reallocated_Sector_Ct"),
+        (196, "Reallocated_Event_Count") => Some("Reallocated_Event_Count"),
+        (197, "Current_Pending_Sector" | "Pending_Sector_Count") => Some("Current_Pending_Sector"),
+        (198, "Offline_Uncorrectable") => Some("Offline_Uncorrectable"),
+        (187, "Reported_Uncorrect") => Some("Reported_Uncorrect"),
+        (187, "Uncorrectable_Error_Cnt") if model.starts_with("Samsung SSD 870 EVO ") => {
+            Some("Reported_Uncorrect")
+        }
+        (199, "UDMA_CRC_Error_Count" | "CRC_Error_Count" | "SATA_CRC_Error_Count") => {
             Some("UDMA_CRC_Error_Count")
         }
-        "Command_Timeout" | "Command_Timeouts" => Some("Command_Timeout"),
+        (218, "CRC_Error_Count") if phison => Some("vendor_crc_errors"),
+        (188, "Command_Timeout" | "Command_Timeouts") => Some("Command_Timeout"),
         _ => None,
+    }
+}
+fn normalize_ata(rows: &[Value]) -> Vec<AtaAttribute> {
+    rows.iter()
+        .filter_map(|row| {
+            let id = u8::try_from(row["id"].as_u64()?)
+                .ok()
+                .filter(|id| *id != 0)?;
+            Some(AtaAttribute {
+                id,
+                name: row["name"].as_str().unwrap_or("Unknown").trim().into(),
+                normalized_value: row["value"].as_u64(),
+                raw: row["raw"].clone(),
+                state: if row["raw"]["value"].is_u64() {
+                    AttributeState::Available
+                } else {
+                    AttributeState::ReadError
+                },
+            })
+        })
+        .collect()
+}
+fn interpret_ata(out: &mut Snapshot, attributes: &[AtaAttribute]) {
+    let phison = phison_profile(&out.model, &out.model_family);
+    let mut ids = BTreeSet::new();
+    for a in attributes {
+        let id = a.id;
+        if !ids.insert(id) {
+            out.issue
+                .get_or_insert_with(|| format!("duplicate SMART attribute ID {id}"));
+        }
+        let name = a.name.as_str();
+        let key = counter_name(Some(u64::from(id)), name, &out.model, phison);
+        if phison && name == "Not_In_Use" {
+            let unsupported = match id {
+                196 => Some("Reallocated_Event_Count"),
+                197 => Some("Current_Pending_Sector"),
+                _ => None,
+            };
+            if let Some(key) = unsupported {
+                out.attribute_states
+                    .insert(key.into(), AttributeState::Unsupported);
+            }
+        }
+        // ID 188 still requires explicit scalar formatting; packed raw is not
+        // interpreted merely because its physical value was read successfully.
+        let scalar = a
+            .scalar_value()
+            .filter(|_| key != Some("Command_Timeout") || a.raw["string"].is_string());
+        if let (Some(key), Some(value)) = (key, scalar) {
+            out.record_counter(key, id, value);
+            if key == "vendor_crc_errors" {
+                out.record_counter("UDMA_CRC_Error_Count", id, value);
+            }
+        } else {
+            out.unknown_attributes
+                .insert(format!("{id}:{name}"), a.raw.clone());
+            if let Some(key) = key.filter(|key| *key != "Command_Timeout") {
+                out.attribute_states
+                    .insert(key.into(), AttributeState::ReadError);
+                if key == "vendor_crc_errors" {
+                    out.attribute_states
+                        .insert("UDMA_CRC_Error_Count".into(), AttributeState::ReadError);
+                }
+                out.issue
+                    .get_or_insert_with(|| format!("invalid scalar SMART attribute {id} {name}"));
+            }
+        }
+        if matches!(
+            name,
+            "SSD_Life_Left" | "Percent_Lifetime_Remain" | "Media_Wearout_Indicator"
+        ) {
+            out.remaining_life = a.normalized_value.filter(|value| *value <= 100);
+        }
     }
 }
 pub fn parse(bytes: &[u8], exit_code: i32) -> Result<Snapshot> {
@@ -189,6 +409,7 @@ pub fn parse(bytes: &[u8], exit_code: i32) -> Result<Snapshot> {
     let incomplete = exit.incomplete || !usable;
     let mut out = Snapshot {
         model: s(&v, "model_name"),
+        model_family: s(&v, "model_family"),
         serial: s(&v, "serial_number"),
         firmware: s(&v, "firmware_version"),
         exit,
@@ -216,6 +437,10 @@ pub fn parse(bytes: &[u8], exit_code: i32) -> Result<Snapshot> {
         out.wwn = s(&v, "logical_unit_id");
     }
     out.wwn = nonzero_wwn(&out.wwn).unwrap_or_default().to_owned();
+    out.ata_attributes = v["ata_smart_attributes"]["table"]
+        .as_array()
+        .map(|rows| normalize_ata(rows))
+        .unwrap_or_default();
     // On read/checksum failure the measurements may be unreliable. Preserve explicit
     // exit-status health evidence, but do not infer recovery from incomplete data.
     if exit.disk_failing {
@@ -225,37 +450,18 @@ pub fn parse(bytes: &[u8], exit_code: i32) -> Result<Snapshot> {
         out.prefailure = Some(true);
     }
     if incomplete {
+        for attribute in &mut out.ata_attributes {
+            attribute.state = AttributeState::ReadError;
+        }
         return Ok(out);
     }
     out.passed = out.passed.or_else(|| v["smart_status"]["passed"].as_bool());
     out.prefailure = Some(exit.prefailure);
     out.temperature = v["temperature"]["current"].as_i64();
     out.power_on_hours = v["power_on_time"]["hours"].as_u64();
-    if let Some(attrs) = v["ata_smart_attributes"]["table"].as_array() {
-        for a in attrs {
-            let name = a["name"].as_str().unwrap_or("Unknown");
-            let raw = a["raw"]["value"].as_u64();
-            // Composite raw strings (e.g. Seagate raw16) are not scalar counters.
-            let scalar = a["raw"]["string"]
-                .as_str()
-                .is_none_or(|text| text.trim().parse::<u64>().ok() == raw);
-            let key = counter_name(name);
-            // Without a formatted scalar value, attribute 188's encoding is ambiguous.
-            let timeout_known = key != Some("Command_Timeout") || a["raw"]["string"].is_string();
-            if let (Some(key), Some(n)) = (key.filter(|_| scalar && timeout_known), raw) {
-                out.counters.insert(key.into(), n);
-            } else {
-                out.unknown_attributes
-                    .insert(format!("{}:{name}", a["id"]), a["raw"].clone());
-            }
-            if matches!(
-                name,
-                "SSD_Life_Left" | "Percent_Lifetime_Remain" | "Media_Wearout_Indicator"
-            ) {
-                out.remaining_life = a["value"].as_u64().filter(|n| *n <= 100);
-            }
-        }
-    }
+    let attributes = std::mem::take(&mut out.ata_attributes);
+    interpret_ata(&mut out, &attributes);
+    out.ata_attributes = attributes;
     let nv = &v["nvme_smart_health_information_log"];
     out.critical_warning = nv["critical_warning"].as_u64();
     out.temperature = out.temperature.or_else(|| nv["temperature"].as_i64());

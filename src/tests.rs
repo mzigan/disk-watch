@@ -2073,3 +2073,540 @@ fn saved_events_escape_external_text_and_handle_invalid_timestamp() {
     assert!(!output.contains('\u{1b}'));
     assert!(event_history(&State::default(), 20).contains("No saved disk events."));
 }
+
+const SAMSUNG_PROFILE: &[u8] = include_bytes!("../tests/fixtures/smart_samsung_profile.json");
+const KINGSTON_PROFILE: &[u8] = include_bytes!("../tests/fixtures/smart_kingston_profile.json");
+
+#[test]
+fn samsung_187_alias_is_available_and_growth_is_critical() {
+    let before = smart::parse(SAMSUNG_PROFILE, 0).unwrap();
+    assert_eq!(before.counters.get("Reported_Uncorrect"), Some(&0));
+    let mut json: serde_json::Value = serde_json::from_slice(SAMSUNG_PROFILE).unwrap();
+    let attr = json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["id"] == 187)
+        .unwrap();
+    attr["raw"] = serde_json::json!({"value":3,"string":"3"});
+    let after = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    let events = alert::diff(
+        &device(),
+        Some(&before),
+        &after,
+        &mut false,
+        &Config::default().temperature,
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.category == "Reported_Uncorrect" && e.severity == Severity::Critical)
+    );
+}
+
+#[test]
+fn kingston_5_is_retired_blocks_and_197_is_not_pending() {
+    let snapshot = smart::parse(KINGSTON_PROFILE, 0).unwrap();
+    assert_eq!(snapshot.counters.get("Reallocated_Sector_Ct"), Some(&0));
+    assert!(!snapshot.counters.contains_key("Current_Pending_Sector"));
+    assert!(snapshot.unknown_attributes.contains_key("197:Not_In_Use"));
+}
+
+#[test]
+fn real_legacy_ssd_stale_state_updates_without_reset_or_lost_identity() {
+    let dir = temp();
+    let path = dir.join("state.json");
+    std::fs::write(
+        &path,
+        include_bytes!("../tests/fixtures/state_ssd_stale_legacy.json"),
+    )
+    .unwrap();
+    let mut state = state::read(&path).unwrap();
+    assert!(state.disks.values().all(|d| d.health() == "Unknown"));
+    let original_keys: Vec<_> = state.disks.keys().cloned().collect();
+    let preserved = Event::new(
+        Severity::Warning,
+        None,
+        "kernel_timeout",
+        "preserved historical event",
+    );
+    state.remember(preserved.clone());
+    let (tx, _) = mpsc::channel(32);
+    for bytes in [SAMSUNG_PROFILE, KINGSTON_PROFILE] {
+        let snapshot = smart::parse(bytes, 0).unwrap();
+        let mut d = state
+            .disks
+            .values()
+            .find(|d| d.device.serial == snapshot.serial)
+            .unwrap()
+            .device
+            .clone();
+        d.diskseq = None; // No live sysfs dependency in fixture tests.
+        d.path = if bytes == SAMSUNG_PROFILE {
+            "/dev/sdz"
+        } else {
+            "/dev/sdy"
+        }
+        .into();
+        apply_result(
+            &mut state,
+            d.clone(),
+            Ok(smart::Reading::Checked(Box::new(snapshot))),
+            &Config::default(),
+            &tx,
+        );
+        assert_eq!(state.disks[&d.key()].health(), "OK", "{}", d.model);
+        assert!(
+            state.disks[&d.key()]
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .stale_fields
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        state.disks.keys().cloned().collect::<Vec<_>>(),
+        original_keys
+    );
+    assert!(
+        state
+            .recent_alerts
+            .iter()
+            .any(|e| e.message == preserved.message)
+    );
+    state.save(&path).unwrap();
+    let reloaded = state::read(&path).unwrap();
+    assert!(reloaded.disks.values().all(|d| d.health() == "OK"));
+    assert!(
+        reloaded
+            .recent_alerts
+            .iter()
+            .any(|e| e.message == preserved.message)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn attribute_ids_and_profiles_prevent_vendor_counter_alias_collisions() {
+    let mut json: serde_json::Value = serde_json::from_slice(KINGSTON_PROFILE).unwrap();
+    json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["id"] == 199)
+        .unwrap()["raw"] = serde_json::json!({"value":7,"string":"7"});
+    let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert_eq!(snapshot.counters["UDMA_CRC_Error_Count"], 7); // ID 218=0 cannot erase ID 199.
+    json["model_name"] = "Unrecognised vendor SSD".into();
+    json.as_object_mut().unwrap().remove("model_family");
+    let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert!(!snapshot.counters.contains_key("Reallocated_Sector_Ct"));
+    let mut json: serde_json::Value = serde_json::from_slice(SAMSUNG_PROFILE).unwrap();
+    json["model_name"] = "Unrecognised vendor SSD".into();
+    json.as_object_mut().unwrap().remove("model_family");
+    let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert!(!snapshot.counters.contains_key("Reported_Uncorrect"));
+}
+
+#[test]
+fn ata_attribute_states_distinguish_unsupported_stale_and_read_error() {
+    use smart::AttributeState::{Available, ReadError, Stale, Unsupported};
+    let original = smart::parse(SAMSUNG_PROFILE, 0).unwrap();
+    assert_eq!(original.attribute_state("Reported_Uncorrect"), Available);
+    // Never-observed optional fields are not invented as zero or stale.
+    assert_eq!(
+        original.attribute_state("Current_Pending_Sector"),
+        Unsupported
+    );
+    assert!(!original.counters.contains_key("Current_Pending_Sector"));
+    assert!(!original.unknown());
+    let mut missing: serde_json::Value = serde_json::from_slice(SAMSUNG_PROFILE).unwrap();
+    missing["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|a| a["id"] != 187);
+    let bytes = serde_json::to_vec(&missing).unwrap();
+    let mut snapshot = smart::parse(&bytes, 0).unwrap();
+    snapshot.retain_missing(&original);
+    assert_eq!(snapshot.attribute_state("Reported_Uncorrect"), Stale);
+    assert_eq!(snapshot.counters["Reported_Uncorrect"], 0);
+    assert!(snapshot.unknown());
+    let mut failed = smart::parse(&bytes, 4).unwrap();
+    failed.retain_missing(&original);
+    assert_eq!(failed.attribute_state("Reported_Uncorrect"), ReadError);
+    assert!(failed.issue.is_some());
+    assert!(failed.unknown());
+    let kingston = smart::parse(KINGSTON_PROFILE, 0).unwrap();
+    assert_eq!(kingston.attribute_state("Reallocated_Sector_Ct"), Available);
+    assert_eq!(
+        kingston.attribute_state("Current_Pending_Sector"),
+        Unsupported
+    );
+    let mut old = kingston.clone();
+    old.counters.insert("Current_Pending_Sector".into(), 0);
+    old.attribute_states.remove("Current_Pending_Sector"); // Legacy zero with no provenance.
+    let mut current = kingston.clone();
+    current.retain_missing(&old);
+    assert_eq!(
+        current.attribute_state("Current_Pending_Sector"),
+        Unsupported
+    );
+    assert!(!current.stale_fields.contains("Current_Pending_Sector"));
+    assert!(!current.unknown());
+    // Even an explicit unsupported marker must not silently erase old bad evidence.
+    old.counters.insert("Current_Pending_Sector".into(), 9);
+    let mut current = kingston;
+    current.retain_missing(&old);
+    assert_eq!(current.counters["Current_Pending_Sector"], 9);
+    assert_eq!(current.attribute_state("Current_Pending_Sector"), Stale);
+    assert!(current.unknown());
+}
+
+#[test]
+fn malformed_known_ata_value_is_read_error_not_zero() {
+    let mut json: serde_json::Value = serde_json::from_slice(SAMSUNG_PROFILE).unwrap();
+    json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["id"] == 187)
+        .unwrap()["raw"] = serde_json::json!({"value":"invalid","string":"invalid"});
+    let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert_eq!(
+        snapshot.attribute_state("Reported_Uncorrect"),
+        smart::AttributeState::ReadError
+    );
+    assert!(snapshot.issue.is_some());
+    assert!(!snapshot.counters.contains_key("Reported_Uncorrect"));
+    assert!(
+        snapshot
+            .unknown_attributes
+            .contains_key("187:Uncorrectable_Error_Cnt")
+    );
+    let mut d = device();
+    d.serial = snapshot.serial.clone();
+    let mut state = State::default();
+    let (tx, _) = mpsc::channel(32);
+    apply_result(
+        &mut state,
+        d.clone(),
+        Ok(smart::Reading::Checked(Box::new(snapshot))),
+        &Config::default(),
+        &tx,
+    );
+    assert_eq!(
+        state.disks[&d.key()].check_status,
+        state::CheckStatus::Partial
+    );
+    assert_ne!(state.disks[&d.key()].health(), "OK");
+}
+
+#[test]
+fn nonzero_ata_errors_and_kernel_evidence_remain_alarms() {
+    for (bytes, id, health) in [
+        (SAMSUNG_PROFILE, 187, "Critical"),
+        (KINGSTON_PROFILE, 5, "Warning"),
+    ] {
+        let mut json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let attr = json["ata_smart_attributes"]["table"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|a| a["id"] == id)
+            .unwrap();
+        attr["raw"] = serde_json::json!({"value":2,"string":"2"});
+        let bad = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+        let mut d = device();
+        d.serial = bad.serial.clone();
+        d.model = bad.model.clone();
+        let mut state = State::default();
+        let (tx, _) = mpsc::channel(32);
+        apply_result(
+            &mut state,
+            d.clone(),
+            Ok(smart::Reading::Checked(Box::new(bad))),
+            &Config::default(),
+            &tx,
+        );
+        assert_eq!(state.disks[&d.key()].health(), health);
+        json["ata_smart_attributes"]["table"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["id"] != id);
+        let missing = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+        apply_result(
+            &mut state,
+            d.clone(),
+            Ok(smart::Reading::Checked(Box::new(missing))),
+            &Config::default(),
+            &tx,
+        );
+        assert_ne!(state.disks[&d.key()].health(), "OK");
+        // No disappearance may emit a synthetic counter-recovery event.
+        assert!(
+            !state
+                .recent_alerts
+                .iter()
+                .any(|e| e.message.contains("decreased"))
+        );
+        recovery_event(&mut state, Some(&d), "I/O error");
+        assert_eq!(state.disks[&d.key()].health(), "Critical");
+    }
+}
+
+#[test]
+fn kingston_vendor_crc_counter_keeps_its_own_warning() {
+    let before = smart::parse(KINGSTON_PROFILE, 0).unwrap();
+    let mut json: serde_json::Value = serde_json::from_slice(KINGSTON_PROFILE).unwrap();
+    json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["id"] == 218)
+        .unwrap()["raw"] = serde_json::json!({"value":3,"string":"3"});
+    let after = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert_eq!(after.counters["UDMA_CRC_Error_Count"], 3);
+    assert_eq!(after.counters["vendor_crc_errors"], 3);
+    let events = alert::diff(
+        &device(),
+        Some(&before),
+        &after,
+        &mut false,
+        &Config::default().temperature,
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.category == "vendor_crc_errors" && e.severity == Severity::Warning)
+    );
+    let mut d = device();
+    d.serial = after.serial.clone();
+    let mut state = State::default();
+    let (tx, _) = mpsc::channel(32);
+    apply_result(
+        &mut state,
+        d.clone(),
+        Ok(smart::Reading::Checked(Box::new(after))),
+        &Config::default(),
+        &tx,
+    );
+    assert_eq!(state.disks[&d.key()].health(), "Warning");
+}
+
+const PATRIOT_BURST_PROFILE: &[u8] =
+    include_bytes!("../tests/fixtures/smart_patriot_burst_profile.json");
+
+#[test]
+fn real_patriot_218_preserves_legacy_crc_semantics() {
+    let snapshot = smart::parse(PATRIOT_BURST_PROFILE, 0).unwrap();
+    assert_eq!(snapshot.counters.get("UDMA_CRC_Error_Count"), Some(&0));
+    let mut d = device();
+    d.model = snapshot.model.clone();
+    d.serial = snapshot.serial.clone();
+    let mut state = State::default();
+    let mut old = DiskState::new(d.clone());
+    let mut prior = snapshot.clone();
+    prior.counters.insert("UDMA_CRC_Error_Count".into(), 0);
+    old.snapshot = Some(prior);
+    state.disks.insert(d.key(), old);
+    let (tx, _) = mpsc::channel(32);
+    apply_result(
+        &mut state,
+        d.clone(),
+        Ok(smart::Reading::Checked(Box::new(snapshot))),
+        &Config::default(),
+        &tx,
+    );
+    assert_eq!(state.disks[&d.key()].health(), "OK");
+    assert!(
+        !state.disks[&d.key()]
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .stale_fields
+            .contains("UDMA_CRC_Error_Count")
+    );
+}
+
+#[test]
+fn crc_physical_values_and_indicator_are_order_independent() {
+    for (crc199, crc218) in [(0, 0), (7, 0), (0, 9), (7, 9)] {
+        for reverse in [false, true] {
+            let mut json: serde_json::Value = serde_json::from_slice(KINGSTON_PROFILE).unwrap();
+            let rows = json["ata_smart_attributes"]["table"]
+                .as_array_mut()
+                .unwrap();
+            for row in rows.iter_mut() {
+                if row["id"] == 199 {
+                    row["raw"] = serde_json::json!({"value":crc199,"string":crc199.to_string()});
+                }
+                if row["id"] == 218 {
+                    row["raw"] = serde_json::json!({"value":crc218,"string":crc218.to_string()});
+                }
+            }
+            if reverse {
+                rows.reverse();
+            }
+            let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+            assert_eq!(
+                snapshot
+                    .ata_attributes
+                    .iter()
+                    .find(|a| a.id == 199)
+                    .unwrap()
+                    .scalar_value(),
+                Some(crc199)
+            );
+            assert_eq!(
+                snapshot
+                    .ata_attributes
+                    .iter()
+                    .find(|a| a.id == 218)
+                    .unwrap()
+                    .scalar_value(),
+                Some(crc218)
+            );
+            assert_eq!(
+                snapshot.counters["UDMA_CRC_Error_Count"],
+                crc199.max(crc218)
+            );
+            assert_eq!(snapshot.counters["vendor_crc_errors"], crc218);
+            assert_eq!(
+                snapshot.counter_sources["UDMA_CRC_Error_Count"],
+                [199, 218].into()
+            );
+        }
+    }
+}
+
+#[test]
+fn phison_family_mapping_is_general_but_unknown_218_is_not_crc() {
+    let mut json: serde_json::Value = serde_json::from_slice(PATRIOT_BURST_PROFILE).unwrap();
+    json["model_name"] = "Corsair Force LE SSD".into();
+    let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert_eq!(
+        snapshot.counter_sources["UDMA_CRC_Error_Count"],
+        [218].into()
+    );
+    json["model_name"] = "Unknown Vendor SSD".into();
+    json["model_family"] = "Unrecognised controller".into();
+    let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert!(!snapshot.counters.contains_key("UDMA_CRC_Error_Count"));
+    assert!(snapshot.ata_attributes.iter().any(|a| a.id == 218));
+    assert!(
+        snapshot
+            .unknown_attributes
+            .contains_key("218:CRC_Error_Count")
+    );
+}
+
+#[test]
+fn missing_or_unreadable_crc_provider_cannot_clear_old_evidence() {
+    let mut json: serde_json::Value = serde_json::from_slice(KINGSTON_PROFILE).unwrap();
+    json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["id"] == 199)
+        .unwrap()["raw"] = serde_json::json!({"value":7,"string":"7"});
+    let old = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    for malformed in [false, true] {
+        let mut current = json.clone();
+        let rows = current["ata_smart_attributes"]["table"]
+            .as_array_mut()
+            .unwrap();
+        if malformed {
+            rows.iter_mut().find(|a| a["id"] == 199).unwrap()["raw"] =
+                serde_json::json!({"value":"bad"});
+        } else {
+            rows.retain(|a| a["id"] != 199);
+        }
+        let mut snapshot = smart::parse(&serde_json::to_vec(&current).unwrap(), 0).unwrap();
+        snapshot.retain_missing(&old);
+        assert_eq!(snapshot.counters["UDMA_CRC_Error_Count"], 7);
+        assert!(snapshot.stale_fields.contains("UDMA_CRC_Error_Count"));
+        assert!(snapshot.unknown());
+        let events = alert::diff(
+            &device(),
+            Some(&old),
+            &snapshot,
+            &mut false,
+            &Config::default().temperature,
+        );
+        assert!(!events.iter().any(|e| e.message.contains("decreased")));
+        // Further polls still cannot turn the missing component into a zero.
+        let mut next = smart::parse(&serde_json::to_vec(&current).unwrap(), 0).unwrap();
+        next.retain_missing(&snapshot);
+        assert_eq!(next.counters["UDMA_CRC_Error_Count"], 7);
+        assert!(next.unknown());
+    }
+}
+
+#[test]
+fn legacy_nonzero_crc_with_unknown_source_is_not_silently_reset() {
+    let mut old = smart::parse(PATRIOT_BURST_PROFILE, 0).unwrap();
+    old.counters.insert("UDMA_CRC_Error_Count".into(), 9);
+    old.counter_sources.clear();
+    old.ata_attributes.clear();
+    old.attribute_states.clear();
+    for _ in 0..2 {
+        let mut next = smart::parse(PATRIOT_BURST_PROFILE, 0).unwrap();
+        next.retain_missing(&old);
+        assert_eq!(next.counters["UDMA_CRC_Error_Count"], 9);
+        assert!(next.unknown());
+        old = next;
+    }
+}
+
+#[test]
+fn duplicate_ata_rows_are_preserved_and_rejected_as_complete_data() {
+    let mut json: serde_json::Value = serde_json::from_slice(KINGSTON_PROFILE).unwrap();
+    let rows = json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap();
+    let duplicate = rows.iter().find(|a| a["id"] == 199).unwrap().clone();
+    rows.push(duplicate);
+    let snapshot = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert_eq!(
+        snapshot
+            .ata_attributes
+            .iter()
+            .filter(|a| a.id == 199)
+            .count(),
+        2
+    );
+    assert!(snapshot.issue.as_ref().unwrap().contains("duplicate"));
+    assert!(snapshot.unknown());
+}
+
+#[test]
+fn larger_218_counter_does_not_hide_growth_of_physical_199() {
+    let mut json: serde_json::Value = serde_json::from_slice(KINGSTON_PROFILE).unwrap();
+    let rows = json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap();
+    rows.iter_mut().find(|a| a["id"] == 218).unwrap()["raw"] =
+        serde_json::json!({"value":10,"string":"10"});
+    rows.iter_mut().find(|a| a["id"] == 199).unwrap()["raw"] =
+        serde_json::json!({"value":1,"string":"1"});
+    let before = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    json["ata_smart_attributes"]["table"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["id"] == 199)
+        .unwrap()["raw"] = serde_json::json!({"value":2,"string":"2"});
+    let after = smart::parse(&serde_json::to_vec(&json).unwrap(), 0).unwrap();
+    assert_eq!(before.counters["UDMA_CRC_Error_Count"], 10);
+    assert_eq!(after.counters["UDMA_CRC_Error_Count"], 10);
+    let events = alert::diff(
+        &device(),
+        Some(&before),
+        &after,
+        &mut false,
+        &Config::default().temperature,
+    );
+    assert!(events.iter().any(|e| e.severity == Severity::Warning
+        && e.message.contains("ATA 199 CRC count changed 1 -> 2")));
+}

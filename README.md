@@ -114,12 +114,66 @@ power check может быть проигнорирован самим smartctl
 универсальной гарантии для USB/RAID нет. Экзотические мосты с требуемым `-d` не поддержаны.
 Семантика `-n` описана в [smartctl manual](https://raw.githubusercontent.com/smartmontools/smartmontools/RELEASE_7_2/smartmontools/smartctl.8.in).
 
-ATA-показатели распознаются по известным именам, не только ID. `197/Not_In_Use`
-не становится pending sector. Неизвестные поля сохраняются в `unknown_attributes`
+ATA-показатели распознаются по числовому ID с проверкой известного имени и,
+для vendor-вариантов, модели. Один ID сам по себе не доказывает семантику:
+
+- Samsung SSD 870 EVO: `187/Uncorrectable_Error_Cnt` → `Reported_Uncorrect`.
+- Подтверждённое семейство Phison: `5/Retired_Block_Count` →
+  `Reallocated_Sector_Ct` для совместимости state. У SSD это выведенные блоки,
+  а не секторы; `197/Not_In_Use` (и `196/Not_In_Use` у OEM) → `Unsupported`.
+- Подтверждение Phison — `model_family` из smartctl: `Phison Driven SSDs` или
+  `Phison Driven OEM SSDs`; при отсутствии family допускаются документированные
+  модели Patriot Burst (включая 120/240/480/960GB) и KINGSTON SM2280S3G2120G.
+  Основание: [база smartmontools drivedb.h](https://raw.githubusercontent.com/smartmontools/smartmontools/master/smartmontools/drivedb.h),
+  записи семейств Phison с ID 218 `CRC_Error_Count`. Это не общее правило для
+  произвольного SSD с ID 218.
+
+Физические ATA-наблюдения нормализуются отдельно в `ata_attributes`:
+ID, исходное имя, normalized value, полный raw и состояние чтения.
+Затем известные сочетания ID/имени/семейства интерпретируются как диагностические
+показатели. ID 199 и 218 никогда не перезаписывают друг друга; даже дубли ID
+сохраняются, но дают неполную проверку вместо молчаливой перезаписи.
+
+Для совместимости `UDMA_CRC_Error_Count` — CRC-индикатор: максимум из
+подтверждённых физических источников. На HDD обычно это только ID 199; у Patriot
+Burst — ID 218; у Kingston могут присутствовать оба. Это не сумма raw и не
+утверждение, что 199 и 218 — один физический счётчик. Их значения остаются
+раздельными в `ata_attributes`, источники записаны в `counter_sources`, а
+`vendor_crc_errors` отдельно сохраняет 218. Рост меньшего ID 199 под большим 218
+также создаёт Warning; рост 218 отслеживается его отдельным индикатором.
+
+Если ранее известный источник исчез/не прочитан, старый ненулевой индикатор не
+обнуляется другим источником, даже если тот сейчас равен нулю. Для legacy CRC с
+ненулевым значением без сведений о происхождении снижение при неполном покрытии
+источников остаётся Stale/Unknown до достоверного подтверждения; это сознательная
+защита от потери старых ошибок.
+
+Неизвестные сочетания ID/имени/модели сохраняются в `unknown_attributes`
 и не создают health alert. Составной raw, например Seagate `Command_Timeout`
 с несколькими числами, не сравнивается как один счётчик. Для `Command_Timeout`
 необходим явно скалярный `raw.string`, совпадающий с `raw.value`.
 Остаток ресурса SSD трактуется только для известных имён.
+
+`attribute_states` в snapshot различает `Available` (новое значение),
+`Unsupported` (непредоставляемый необязательный показатель), `Stale` (ранее
+известное значение сейчас не подтверждено) и `ReadError` (ошибка чтения/разбора).
+Отсутствующий без истории необязательный показатель не создаётся со значением 0
+и не вызывает Unknown. Если известный показатель просто исчез, сохраняется
+last-known значение со Stale/ReadError, а не предполагается восстановление.
+Явный `Not_In_Use` объясняет прежний нулевой pending: этот ноль сохраняется
+только как исторический Unsupported и больше не вызывает ложный Unknown.
+Прежний ненулевой pending при этом остаётся Stale и не превращает health в OK.
+Некорректный raw известного скалярного счётчика даёт ReadError/Partial.
+В `--verbose` доступны состояния; составной vendor raw по-прежнему не трактуется
+как обычный монотонный счётчик.
+
+Схема state остаётся версии 2: `attribute_states`, `ata_attributes`,
+`counter_sources` и `model_family` имеют пустые defaults при
+чтении прежних JSON. Переклассификация происходит при следующей проверке того же
+диска; история событий и ключ WWN/model+serial сохраняются, сброс state не нужен.
+Фикстуры `smart_samsung_profile.json`, `smart_kingston_profile.json`,
+`smart_patriot_burst_profile.json` и `state_ssd_stale_legacy.json` получены из реальных JSON/копии state от 2026-11-01;
+serial и WWN заменены тестовыми, SMART-значения сохранены.
 
 Self-tests не запускаются. Последний доступный в JSON результат различает
 `Passed`, `Failed`, `Aborted`, `InProgress`, `Unknown`. Доступность self-test log
