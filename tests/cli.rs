@@ -451,3 +451,17 @@ fn events_after_recovery_are_local_limited_and_read_only() {
     assert_eq!(fs::read(&path).unwrap(), before);
     assert!(!marker.exists());
 }
+
+#[test]
+fn tui_without_terminal_refuses_without_scanning_or_writing() {
+    let env = Sandbox::new();
+    for name in ["lsblk", "smartctl", "journalctl"] {
+        env.script(name, "#!/bin/sh\nexit 99\n");
+    }
+    let output = env.command("tui").stdin(Stdio::null()).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("interactive terminal"));
+    assert!(!env.root.join("state.json").exists());
+    assert!(!env.root.join("state.json.lock").exists());
+    assert!(!env.root.join("history.db").exists());
+}

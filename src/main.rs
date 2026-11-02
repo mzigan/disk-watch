@@ -1,10 +1,12 @@
 mod alert;
 mod config;
 mod devices;
+mod history;
 mod kernel;
 mod notifier;
 mod smart;
 mod state;
+mod tui;
 
 use alert::{Event, Severity, now};
 use anyhow::{Context, Result};
@@ -27,6 +29,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Read-only interactive view of saved health, events and history.
+    Tui,
     Daemon,
     Check,
     Devices,
@@ -861,6 +865,9 @@ async fn main() -> Result<()> {
             .unwrap_or(std::path::Path::new("/etc/disk-watch/config.toml")),
         cli.config.is_some(),
     )?;
+    if matches!(cli.command, Action::Tui) {
+        return tui::run(&cli.state, cfg.check_interval_seconds).await;
+    }
     if let Action::Events { limit } = cli.command {
         print!("{}", event_history(&State::load(&cli.state), limit));
         return Ok(());
@@ -913,6 +920,7 @@ async fn main() -> Result<()> {
                 tracing::warn!(error=%e, "kernel journal check failed");
             }
             state.save(&cli.state).context("save state")?;
+            history::record_after_save(&cli.state, &state);
             display(&state);
             drop(tx);
             anyhow::ensure!(

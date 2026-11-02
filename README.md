@@ -40,6 +40,7 @@ sudo disk-watch status
 sudo disk-watch status --verbose # подробности и Recent events
 sudo disk-watch events
 sudo disk-watch events --limit 50
+sudo disk-watch tui
 sudo disk-watch daemon
 sudo disk-watch --config ./packaging/config.toml --state /tmp/disk-watch/state.json check
 ```
@@ -67,6 +68,59 @@ sudo disk-watch --config ./packaging/config.toml --state /tmp/disk-watch/state.j
 
 `check` и `daemon` блокируют один lock рядом со state. При работающем сервисе
 используйте `status` либо отдельный `--state`. Чтение status не блокирует writer.
+
+## Интерактивный просмотр
+
+```bash
+sudo disk-watch tui
+# Либо чтение отдельной копии state без доступа к дискам:
+disk-watch --state /tmp/disk-watch/state.json tui
+```
+
+TUI на ratatui/crossterm только читает state и `history.db` рядом с ним.
+Обновление — каждые 2 секунды; SMART, discovery и journal не запускаются.
+Выход не влияет на daemon. Для стандартного каталога с правами 0700 нужен sudo.
+
+Текущий health берётся из того же метода, что и CLI. `OK` после recovery
+не скрывает историю: `HIST! RECENT C:8 W:4` означает сохранённые проблемы,
+последняя из которых младше 24 часов; `HIST! OLD` — более старые.
+Числа C/W относятся к сохранённым событиям, а не ко всем ошибкам за жизнь диска.
+Вверху отдельно показываются CURRENT и HISTORY. Отсутствующие диски не входят
+в текущие counts. События привязаны строго по DiskIdentity; `current=` и
+`at_event=` показывают разные пути, если диск переставляли.
+
+Клавиши:
+
+- `↑`/`↓`: выбрать диск; в Details/Events — прокрутить строки;
+- `Tab`: Disks → Details → Events → Charts; `e` — фокус Events;
+- `1`/`2`/`3`/`4`: диапазон графиков 1h/24h/7d/30d (по умолчанию 24h);
+- `a`: показать/скрыть absent-диски с last known health;
+- `u`: события uncorrelated, без влияния на health конкретного диска;
+- `r`: перечитать state/history; `q`, `Esc`, `Ctrl-C`: выйти.
+
+На узком терминале таблица занимает всю ширину, а нижняя панель переключается
+через Tab. На широком терминале видны все панели одновременно.
+`STALE / SAVED DATA` означает, что mtime state старше двух интервалов опроса
+плюс 120 секунд либо перечитать state не удалось. Это индикатор возраста,
+а не проверка работоспособности systemd. Отдельное `STALE` в строке диска
+показывает старые/неполные SMART-данные или неуспешную последнюю проверку.
+При ошибке перечитывания предыдущий экран сохраняется с явным предупреждением.
+
+Обновлённый daemon и `check` записывают небольшую SQLite time series в
+`/var/lib/disk-watch/history.db` после сохранения state: timestamp, identity,
+current health, presence и доступную свежую температуру. Запись выполняется
+в существующем фоновом state writer; сбой SQLite не мешает сохранению state.
+Повторные записи journal cursor не создают одинаковых samples. Файл создаётся
+с правами 0600. TUI открывает его read-only, не создаёт БД/lock и не изменяет state.
+Конфигурация службы и формат state не меняются.
+
+Графики показывают только реально записанные наблюдения. Историю температуры
+до установки обновлённого daemon восстановить невозможно: пока samples нет,
+показывается явное сообщение. Health timeline сохраняет наблюдавшиеся переходы
+Critical/Warning → OK; отсутствие обозначено U/ABS. Автоматического удаления
+samples нет. Старый kernel Critical, сохранённый в DiskState, доступен даже после
+вытеснения из кольца Recent events; остальные события ограничены существующим
+кольцом из 100 alerts. Recovery сам по себе события не удаляет.
 
 ## Конфигурация и Unknown
 

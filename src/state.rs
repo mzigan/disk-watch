@@ -362,7 +362,12 @@ pub fn read(path: &Path) -> Result<State> {
 /// One coalescing writer: at most one fsync in flight and one latest snapshot waiting.
 /// Retrying failed writes never blocks kernel/SMART event handling.
 pub async fn writer(path: PathBuf, rx: tokio::sync::watch::Receiver<State>) -> Result<()> {
-    write_loop(rx, move |state| state.save(&path)).await
+    write_loop(rx, move |state| {
+        state.save(&path)?;
+        crate::history::record_after_save(&path, &state);
+        Ok(())
+    })
+    .await
 }
 async fn write_loop<F>(mut rx: tokio::sync::watch::Receiver<State>, save: F) -> Result<()>
 where
