@@ -650,8 +650,12 @@ impl App {
             let set = Dataset::default()
                 .name("C")
                 .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Scatter)
-                .style(Style::default().fg(Color::Cyan))
+                .graph_type(GraphType::Line)
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .data(&temp);
             f.render_widget(
                 Chart::new(vec![set])
@@ -689,7 +693,11 @@ impl App {
         let set = Dataset::default()
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Yellow))
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
             .data(&health);
         if health.is_empty() {
             f.render_widget(Paragraph::new("No recorded health samples in range.\nRetained problems are still available in EVENTS.").wrap(Wrap{trim:false}).block(Block::bordered().title("HEALTH TIMELINE")),health_area);
